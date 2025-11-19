@@ -21,6 +21,8 @@ All servers are tested concurrently for fast results (~5-10 seconds total).
 - No external dependencies (uses only standard library)
 - Works on Windows, macOS, and Linux
 
+**Note**: Use `python3` if `python` is not available on your system.
+
 ## Installation
 
 Clone the repository from GitHub:
@@ -43,7 +45,7 @@ chmod +x stratum_test.py
 Test all preconfigured pools with 1 run each:
 
 ```bash
-python stratum_test.py
+python3 stratum_test.py  # or just 'python' on some systems
 ```
 
 ### Multiple Runs for Accuracy
