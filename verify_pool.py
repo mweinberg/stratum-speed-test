@@ -6,11 +6,24 @@ Connects to a stratum pool as a worker and verifies that the block template
 contains your Bitcoin address in the coinbase transaction. This helps ensure
 the pool is actually solo mining (paying you directly) rather than pool mining.
 
-Usage:
-    python3 verify_pool.py <pool_host> <pool_port> <your_btc_address>
+The tool can verify a specific address or test all 5 Bitcoin address types:
+  • P2PKH (Legacy):     1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa
+  • P2SH (Script Hash): 3EExK1K1TF3v7zsFtQHt14XqexCwgmXM1y
+  • P2WPKH (SegWit):    bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh
+  • P2WSH (SegWit):     bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qccfmv3
+  • P2TR (Taproot):     bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr
 
-Example:
+Usage:
+    # Verify a specific address
+    python3 verify_pool.py <pool_host> <pool_port> <your_btc_address>
+    
+    # Test all address types (-a flag)
+    python3 verify_pool.py <pool_host> <pool_port> -a
+
+Examples:
     python3 verify_pool.py solo.atlaspool.io 3333 bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh
+    python3 verify_pool.py solo.ckpool.org 3333 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa
+    python3 verify_pool.py solo.atlaspool.io 3333 -a
 
 Version: 1.0
 """
