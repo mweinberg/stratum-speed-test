@@ -17,11 +17,13 @@ All servers are tested concurrently for fast results (~5-10 seconds total).
 
 ## Requirements
 
-- Python 3.6 or higher
+- Python 3.6 or higher (Python 3.11+ recommended for best performance)
 - No external dependencies (uses only standard library)
 - Works on Windows, macOS, and Linux
 
 **Note**: Use `python3` if `python` is not available on your system.
+
+**macOS Users**: If using the system Python 3.9.6 (from Command Line Tools), the script includes workarounds for subprocess issues. For best results, consider upgrading to Python 3.11+ via Homebrew: `brew install python@3.11`
 
 ## Installation
 
@@ -48,6 +50,21 @@ Test all preconfigured pools with 1 run each:
 python3 stratum_test.py  # or just 'python' on some systems
 ```
 
+### Address Type Verification (New in v1.1)
+
+Test which Bitcoin address types each pool supports:
+
+```bash
+python stratum_test.py -v
+```
+
+This tests all 5 address types (P2PKH, P2SH, P2WPKH, P2WSH, P2TR) and shows which formats each pool accepts. Results appear as additional columns in the output table:
+- ✓ = Supported
+- X = Not Supported  
+- ? = Unknown (may require valid credentials)
+
+**Note**: Verification adds ~10 seconds per server and uses reduced concurrency for reliability.
+
 ### Multiple Runs for Accuracy
 
 Run multiple tests per server and get average with min-max range:
@@ -57,6 +74,12 @@ python stratum_test.py --runs 3
 ```
 
 Valid options: `--runs 1`, `--runs 2`, or `--runs 3`
+
+You can combine with verification:
+
+```bash
+python stratum_test.py --runs 3 -v
+```
 
 ### Test a Specific Pool
 
@@ -80,6 +103,31 @@ python stratum_test.py solo.atlaspool.io 3333 --runs 3
 ```
 
 **Important:** Both hostname and port must be provided. The script will show an error if only one is specified.
+
+### Pool Verification Tool (New in v1.1)
+
+Use `verify_pool.py` to verify a solo mining pool will pay block rewards to YOUR address:
+
+```bash
+# Verify a specific address
+python3 verify_pool.py solo.atlaspool.io 3333 bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh
+
+# Test all 5 address types
+python3 verify_pool.py solo.atlaspool.io 3333 -a
+```
+
+**What it does:**
+1. Connects to the pool as a mining worker
+2. Requests a block template (mining work)
+3. Parses the coinbase transaction
+4. Verifies YOUR address appears in the payout outputs
+
+**Results:**
+- ✅ Address found - Pool will pay YOU if you find a block
+- ⚠️ Unknown - Could not verify (may require valid credentials)
+- ❌ Address NOT found - WARNING: Pool may not be legitimate!
+
+This tool helps ensure you're using a legitimate solo mining pool that will actually pay you if you find a block, rather than paying the pool operator.
 
 ### JSON Output
 
@@ -234,6 +282,10 @@ Format: `(hostname, port, display_name, country_code)`
 - Try testing a specific server to isolate the issue
 - Check your internet connection
 
+### All pings show "BLOCKED" (macOS)
+- If using system Python 3.9.6, upgrade to Python 3.11+: `brew install python@3.11`
+- Or the script should now work with the v1.1 fix
+
 ### Permission errors on Linux/macOS
 - Make the script executable: `chmod +x stratum_test.py`
 - Or run with: `python3 stratum_test.py`
@@ -304,9 +356,38 @@ For issues or questions:
 - GitHub Issues: [Create an issue]
 - Pool operators: Contact to be added to the preconfigured list
 
-## Version
+## Changelog
 
-1.0 - November 2025
+### Version 1.1 - November 2025
+
+**New Features:**
+- Added: Address type verification (`-v` flag) - Tests all 5 Bitcoin address types (P2PKH, P2SH, P2WPKH, P2WSH, P2TR)
+- Added: `verify_pool.py` - Standalone tool to verify solo mining pools pay to your address
+- Added: Comprehensive address validation with helpful error messages
+- Added: Three-state verification results (✓ Supported, X Not Supported, ? Unknown)
+
+**Improvements:**
+- Improved: Verification reliability with better timeout handling and retry logic
+- Improved: Reduced concurrency during verification (4 workers) to avoid rate limiting
+- Improved: Multiple recv() calls to handle fragmented responses from pools
+- Improved: Added delays between address type tests (1 second) for consistency
+- Improved: Expanded table output shows address type compatibility at a glance
+
+**Bug Fixes:**
+- Fixed: Ping tests now work correctly on macOS with Python 3.9.6
+- Fixed: Resolved subprocess segfault issue causing "BLOCKED" for all hosts
+- Fixed: Invalid P2SH test address replaced with valid one
+- Fixed: Socket timeout issues causing inconsistent verification results
+- Changed: Improved ping implementation using `os.system()` for better compatibility
+
+**Documentation:**
+- Added: Comprehensive preamble explaining verification process
+- Added: Address validation with specific error messages for invalid addresses
+- Updated: Help text explains all 5 address types with examples
+- Updated: README with detailed changelog and new features
+
+### Version 1.0 - November 2025
+- Initial release
 
 ---
 

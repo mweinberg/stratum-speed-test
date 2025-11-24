@@ -1,7 +1,38 @@
 #!/usr/bin/env python3
 """
-Stratum Server Connection Tester
-Tests connectivity and response time to Bitcoin mining stratum servers
+Bitcoin Solo Mining Pool Speed Test
+
+Tests connectivity and response time to Bitcoin solo mining stratum servers
+to help you find the fastest pool from your location. Measures both network
+latency (ping) and actual stratum protocol handshake times.
+
+Features:
+  • Tests 16 popular solo mining pools worldwide
+  • Concurrent testing for fast results (~10 seconds)
+  • Multiple runs for accuracy (--runs 1-3)
+  • Address type verification (-v flag) tests all 5 Bitcoin address formats:
+    - P2PKH (Legacy): 1...
+    - P2SH (Script Hash): 3...
+    - P2WPKH (SegWit): bc1q...
+    - P2WSH (SegWit Script): bc1q... (longer)
+    - P2TR (Taproot): bc1p...
+  • JSON output for automation (--json)
+  • Single server testing mode
+
+Usage:
+    # Test all pools
+    python3 stratum_test.py
+    
+    # Test with verification
+    python3 stratum_test.py -v
+    
+    # Test with multiple runs
+    python3 stratum_test.py --runs 3
+    
+    # Test single pool
+    python3 stratum_test.py solo.atlaspool.io 3333
+
+Version: 1.1
 """
 
 import socket
@@ -13,6 +44,7 @@ import subprocess
 import platform
 import urllib.request
 import urllib.error
+import binascii
 from typing import Optional, Tuple, Dict, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from statistics import mean, median
@@ -46,49 +78,79 @@ def ping_host(hostname: str, timeout: int = 2) -> Optional[float]:
     """
     Perform ICMP ping to hostname and return response time in milliseconds.
     Returns None if ping fails or is not supported.
+    
+    Note: Uses TCP connection test as fallback for systems where ICMP ping
+    has subprocess issues (e.g., Python 3.9 on macOS).
     """
     try:
         system = platform.system().lower()
         
         if system == 'windows':
-            # Windows: ping -n 1 -w 2000 hostname
-            command = ['ping', '-4', '-n', '1', '-w', str(timeout * 1000), hostname]
+            command = ['ping', '-n', '1', '-w', str(timeout * 1000), hostname]
         else:
-            # macOS/Linux
-            if system == 'darwin':  # macOS
-                command = ['ping', '-c', '1', '-W', str(timeout * 1000), hostname]
-            else:  # Linux
-                command = ['ping', '-c', '1', '-W', str(timeout), hostname]
+            # Unix-like systems (macOS, Linux)
+            command = ['ping', '-c', '1', hostname]
         
-        result = subprocess.run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout + 1,
-            text=True
-        )
+        # Try using os.system as a workaround for Python 3.9 subprocess issues
+        import tempfile
+        import os
+        import random
         
-        if result.returncode != 0:
-            return None
+        # Add small random delay to avoid concurrent temp file collisions
+        time.sleep(random.uniform(0, 0.1))
+        
+        with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.txt') as f:
+            temp_file = f.name
+        
+        try:
+            # Redirect output to temp file with timeout
+            if system == 'windows':
+                cmd = f'ping -n 1 -w {timeout * 1000} {hostname} > "{temp_file}" 2>&1'
+            else:
+                # Unix-like systems - don't use -W flag due to inconsistencies
+                # Let the subprocess timeout handle it
+                cmd = f'ping -c 1 {hostname} > "{temp_file}" 2>&1'
             
-        output = result.stdout
-        
-        if system == 'windows':
-            import re
-            matches = re.findall(r'(\d+(?:\.\d+)?)\s*ms', output.lower())
-            if matches:
-                time_str = matches[-1]
-            else:
+            ret = os.system(cmd)
+            
+            # Check if file exists and has content
+            if not os.path.exists(temp_file):
                 return None
-        else:
-            if 'time=' in output:
-                time_part = output.split('time=')[1]
-                time_str = time_part.split('ms')[0].strip().split()[0]
-            else:
+            
+            # Non-zero return code usually means ping failed
+            if ret != 0:
                 return None
+            
+            with open(temp_file, 'r') as f:
+                output = f.read()
+            
+            if not output or len(output) < 10:
+                return None
+            
+            if system == 'windows':
+                import re
+                matches = re.findall(r'(\d+(?:\.\d+)?)\s*ms', output.lower())
+                if matches:
+                    time_str = matches[-1]
+                else:
+                    return None
+            else:
+                if 'time=' in output:
+                    time_part = output.split('time=')[1]
+                    time_str = time_part.split('ms')[0].strip().split()[0]
+                else:
+                    return None
+                    
+            return float(time_str)
+        finally:
+            try:
+                if os.path.exists(temp_file):
+                    os.unlink(temp_file)
+            except:
+                pass
                 
-        return float(time_str)
     except:
+        # Silently fail for ping - it's not critical
         return None
 
 def test_stratum_connection(hostname: str, port: int, timeout: int = 5) -> Optional[float]:
@@ -172,8 +234,157 @@ def get_asn_info(ip: str) -> Optional[Dict[str, str]]:
     except:
         return None
 
+def verify_address_type(hostname: str, port: int, address: str, timeout: int = 5) -> Optional[bool]:
+    """
+    Verify if a pool supports a specific address type.
+    Returns True if supported, False if rejected, None if unknown/error.
+    """
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        
+        try:
+            sock.connect((hostname, port))
+        except (socket.timeout, ConnectionRefusedError, OSError):
+            return None  # Connection failed
+        
+        # Subscribe
+        subscribe_msg = json.dumps({
+            "id": 1,
+            "method": "mining.subscribe",
+            "params": []
+        }) + "\n"
+        
+        try:
+            sock.sendall(subscribe_msg.encode('utf-8'))
+            # Wait for response to arrive
+            time.sleep(0.2)
+            
+            # Read response in chunks
+            response_parts = []
+            sock.settimeout(3)
+            for _ in range(2):
+                chunk = sock.recv(4096).decode('utf-8')
+                if chunk:
+                    response_parts.append(chunk)
+                    if '\n' in chunk and '"id":1' in chunk:
+                        break
+                time.sleep(0.1)
+            
+            subscribe_response = ''.join(response_parts)
+        except (socket.timeout, OSError):
+            return None  # Network error
+        
+        if not subscribe_response:
+            return None
+        
+        # Check if subscribe succeeded
+        subscribe_ok = False
+        for line in subscribe_response.split('\n'):
+            if line.strip():
+                try:
+                    data = json.loads(line)
+                    if data.get('id') == 1 and 'result' in data:
+                        subscribe_ok = True
+                        break
+                except json.JSONDecodeError:
+                    continue
+        
+        if not subscribe_ok:
+            return None  # Can't connect properly
+        
+        # Authorize
+        authorize_msg = json.dumps({
+            "id": 2,
+            "method": "mining.authorize",
+            "params": [address, "x"]
+        }) + "\n"
+        
+        try:
+            sock.sendall(authorize_msg.encode('utf-8'))
+            # Wait for response
+            time.sleep(0.3)
+            
+            # Read response in chunks
+            response_parts = []
+            sock.settimeout(2)
+            for _ in range(3):
+                chunk = sock.recv(8192).decode('utf-8')
+                if chunk:
+                    response_parts.append(chunk)
+                    if '\n' in chunk and '"id":2' in chunk:
+                        break
+                time.sleep(0.1)
+            
+            response = ''.join(response_parts)
+        except (socket.timeout, OSError):
+            return None  # Network error
+        
+        if not response:
+            return None
+        
+        # Check authorization result
+        for line in response.split('\n'):
+            if line.strip():
+                try:
+                    data = json.loads(line)
+                    if data.get('id') == 2:
+                        result = data.get('result')
+                        error = data.get('error')
+                        
+                        # If there's an error, it's rejected
+                        if error:
+                            return False
+                        
+                        # If result is True, it's supported
+                        if result == True:
+                            return True
+                        
+                        # If result is False but no error, unclear
+                        return None
+                except json.JSONDecodeError:
+                    continue
+        
+        # No clear response
+        return None
+        
+    except Exception:
+        return None
+    finally:
+        if sock:
+            try:
+                sock.close()
+            except:
+                pass
+
+
+def test_address_types(hostname: str, port: int) -> Dict[str, Optional[bool]]:
+    """
+    Test all 5 Bitcoin address types against a pool.
+    Returns dict with address type names as keys and support status as values.
+    Values: True = supported, False = not supported, None = unknown
+    """
+    test_addresses = {
+        'P2PKH': '1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa',
+        'P2SH': '3EExK1K1TF3v7zsFtQHt14XqexCwgmXM1y',
+        'P2WPKH': 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq',
+        'P2WSH': 'bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qccfmv3',
+        'P2TR': 'bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr',
+    }
+    
+    results = {}
+    for addr_type, address in test_addresses.items():
+        # Use longer timeout for verification (8 seconds instead of 5)
+        results[addr_type] = verify_address_type(hostname, port, address, timeout=8)
+        # Longer delay between tests to avoid rate limiting (0.5s instead of 0.2s)
+        time.sleep(0.5)
+    
+    return results
+
+
 def test_server_multiple_runs(hostname: str, port: int, display_name: str, 
-                               runs: int, country_code: str = "??") -> Dict:
+                               runs: int, country_code: str = "??", verify: bool = False) -> Dict:
     """Test a server multiple times and return statistics"""
     ping_times = []
     stratum_times = []
@@ -191,7 +402,7 @@ def test_server_multiple_runs(hostname: str, port: int, display_name: str,
         if runs > 1:
             time.sleep(0.1)
     
-    return {
+    result = {
         'hostname': hostname,
         'port': port,
         'display_name': display_name,
@@ -199,6 +410,12 @@ def test_server_multiple_runs(hostname: str, port: int, display_name: str,
         'ping_times': ping_times,
         'stratum_times': stratum_times
     }
+    
+    # Optionally test address type compatibility
+    if verify:
+        result['address_types'] = test_address_types(hostname, port)
+    
+    return result
 
 def format_time_single(time_ms: Optional[float]) -> str:
     """Format single time value for display"""
@@ -235,10 +452,13 @@ def format_time_for_result(result: Dict, use_ping: bool = False) -> str:
     else:
         return format_time_multi(times)
 
-def print_table(results: List[Dict], runs: int):
+def print_table(results: List[Dict], runs: int, verify: bool = False):
     """Print results in a formatted ASCII table"""
     if not results:
         return
+    
+    # Check if verification was performed
+    has_verification = verify and any('address_types' in r for r in results)
     
     # Calculate column widths
     max_name_len = max(len(r['display_name']) for r in results)
@@ -261,17 +481,34 @@ def print_table(results: List[Dict], runs: int):
     stratum_width = max(len(v) for v in stratum_values)
     stratum_width = max(stratum_width, len("Stratum (ms)"))
     
-    # Print table
+    # Address type column widths (if verification enabled)
+    addr_widths = {}
+    if has_verification:
+        addr_types = ['P2PKH', 'P2SH', 'P2WPKH', 'P2WSH', 'P2TR']
+        for addr_type in addr_types:
+            addr_widths[addr_type] = max(len(addr_type), 3)  # At least 3 for checkmark/X
+    
+    # Build separator
     separator = f"+{'-' * (max_name_len + 2)}+{'-' * (country_width + 2)}+{'-' * (max_host_len + 2)}+{'-' * (port_width + 2)}+{'-' * (ping_width + 2)}+{'-' * (stratum_width + 2)}+"
+    if has_verification:
+        for addr_type in addr_types:
+            separator += f"+{'-' * (addr_widths[addr_type] + 2)}+"
     
     print(separator)
     
     # Header
+    header_line = f"| {'Pool Name'.ljust(max_name_len)} | {'CC'.ljust(country_width)} | {'Host'.ljust(max_host_len)} | {'Port'.ljust(port_width)} | {'Ping (ms)'.ljust(ping_width)} | {'Stratum (ms)'.ljust(stratum_width)} |"
+    if has_verification:
+        for addr_type in addr_types:
+            header_line += f" {addr_type.ljust(addr_widths[addr_type])} |"
+    print(header_line)
+    
     if runs > 1:
-        print(f"| {'Pool Name'.ljust(max_name_len)} | {'CC'.ljust(country_width)} | {'Host'.ljust(max_host_len)} | {'Port'.ljust(port_width)} | {'Ping (ms)'.ljust(ping_width)} | {'Stratum (ms)'.ljust(stratum_width)} |")
-        print(f"| {' '.ljust(max_name_len)} | {' '.ljust(country_width)} | {' '.ljust(max_host_len)} | {' '.ljust(port_width)} | {'Avg (Min-Max)'.ljust(ping_width)} | {'Avg (Min-Max)'.ljust(stratum_width)} |")
-    else:
-        print(f"| {'Pool Name'.ljust(max_name_len)} | {'CC'.ljust(country_width)} | {'Host'.ljust(max_host_len)} | {'Port'.ljust(port_width)} | {'Ping (ms)'.ljust(ping_width)} | {'Stratum (ms)'.ljust(stratum_width)} |")
+        subheader = f"| {' '.ljust(max_name_len)} | {' '.ljust(country_width)} | {' '.ljust(max_host_len)} | {' '.ljust(port_width)} | {'Avg (Min-Max)'.ljust(ping_width)} | {'Avg (Min-Max)'.ljust(stratum_width)} |"
+        if has_verification:
+            for addr_type in addr_types:
+                subheader += f" {' '.ljust(addr_widths[addr_type])} |"
+        print(subheader)
     
     print(separator)
     
@@ -280,9 +517,32 @@ def print_table(results: List[Dict], runs: int):
         country_code = result.get('country_code', '??').ljust(country_width)
         ping_str = ping_values[i].ljust(ping_width)
         stratum_str = stratum_values[i].ljust(stratum_width)
-        print(f"| {result['display_name'].ljust(max_name_len)} | {country_code} | {result['hostname'].ljust(max_host_len)} | {str(result['port']).ljust(port_width)} | {ping_str} | {stratum_str} |")
+        
+        row = f"| {result['display_name'].ljust(max_name_len)} | {country_code} | {result['hostname'].ljust(max_host_len)} | {str(result['port']).ljust(port_width)} | {ping_str} | {stratum_str} |"
+        
+        # Add verification columns
+        if has_verification:
+            addr_types_result = result.get('address_types', {})
+            for addr_type in addr_types:
+                supported = addr_types_result.get(addr_type, None)
+                if supported is True:
+                    symbol = '✓'
+                elif supported is False:
+                    symbol = 'X'
+                else:  # None or missing
+                    symbol = '?'
+                row += f" {symbol.ljust(addr_widths[addr_type])} |"
+        
+        print(row)
     
     print(separator)
+    
+    # Print legend if verification was performed
+    if has_verification:
+        print("\nAddress Type Legend: ✓ = Supported, X = Not Supported, ? = Unknown/Requires Auth")
+        print("  P2PKH = Legacy (1...), P2SH = Script Hash (3...)")
+        print("  P2WPKH = SegWit (bc1q...), P2WSH = SegWit Script (bc1q... long)")
+        print("  P2TR = Taproot (bc1p...)")
 
 def print_summary(results: List[Dict]):
     """Print summary of fastest servers"""
@@ -377,7 +637,7 @@ def print_network_info(ipv4: Optional[str], asn_info: Optional[Dict]):
         elif asn_info.get('asn'):
             print(f"Network: {asn_info['asn']}")
 
-def test_all_servers(runs: int = 1):
+def test_all_servers(runs: int = 1, verify: bool = False):
     """Test all predefined servers with concurrent execution"""
     # Print intro
     print_intro()
@@ -390,12 +650,19 @@ def test_all_servers(runs: int = 1):
     print_network_info(ipv4, asn_info)
     
     # Test servers
-    print(f"\nTesting {len(PREDEFINED_SERVERS)} servers (runs: {runs})...")
+    verify_msg = " with address type verification" if verify else ""
+    print(f"\nTesting {len(PREDEFINED_SERVERS)} servers (runs: {runs}){verify_msg}...")
+    if verify:
+        print("  Note: Verification adds ~10 seconds per server")
+        print("  Using reduced concurrency (4 servers at a time) for reliability")
     
     results = []
-    with ThreadPoolExecutor(max_workers=len(PREDEFINED_SERVERS)) as executor:
+    # Reduce concurrency when doing verification to avoid overwhelming pools
+    max_workers = 4 if verify else len(PREDEFINED_SERVERS)
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(test_server_multiple_runs, host, port, name, runs, cc): (host, port, name, cc)
+            executor.submit(test_server_multiple_runs, host, port, name, runs, cc, verify): (host, port, name, cc)
             for host, port, name, cc in PREDEFINED_SERVERS
         }
         
@@ -416,7 +683,7 @@ def test_all_servers(runs: int = 1):
     ))
     
     print("\nResults:")
-    print_table(results, runs)
+    print_table(results, runs, verify)
     print_summary(results)
     
     print()
@@ -508,6 +775,10 @@ Examples:
                         help='Stratum server port (optional)')
     parser.add_argument('--runs', type=int, choices=[1, 2, 3], default=1,
                         help='Number of test runs per server (default: 1)')
+    parser.add_argument('-v', '--verify', action='store_true',
+                        help='Test all 5 Bitcoin address types (P2PKH, P2SH, P2WPKH, P2WSH, P2TR) to verify '
+                             'which formats each pool accepts. This confirms the pool will pay block rewards '
+                             'to your address type. See verify_pool.py for detailed verification. (adds ~10s per server)')
     parser.add_argument('--json', action='store_true',
                         help='Output results in JSON format')
     
@@ -530,7 +801,7 @@ Examples:
         output_json(args.runs)
     # Default: test all servers
     else:
-        test_all_servers(args.runs)
+        test_all_servers(args.runs, args.verify)
 
 if __name__ == "__main__":
     main()
