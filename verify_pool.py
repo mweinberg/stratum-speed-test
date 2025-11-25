@@ -13,6 +13,9 @@ Features:
   • Shows payout percentages for each output (miner vs pool fee)
   • Decodes OP_RETURN witness commitments
   • Tests all 5 Bitcoin address types for compatibility
+  • Analyzes pool architecture (detects proxying indicators)
+  • Automatic retry logic for slow-responding pools
+  • Connection timing metrics
 
 Supported Address Types:
   • P2PKH (Legacy):     1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa
@@ -20,6 +23,12 @@ Supported Address Types:
   • P2WPKH (SegWit):    bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh
   • P2WSH (SegWit):     bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qccfmv3
   • P2TR (Taproot):     bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr
+
+Supported Pool Formats:
+  • Standard (CKPool, AtlasPool, most pools)
+  • SoloHash (sequence marker early in coinb2)
+  • zsolo.bid (non-standard value split)
+  • Custom formats with automatic detection
 
 Usage:
     # Test pool connectivity (uses random address)
@@ -30,12 +39,16 @@ Usage:
     
     # Test all address types (-a flag)
     python3 verify_pool.py <pool_host> <pool_port> -a
+    
+    # Analyze pool architecture (detect proxying)
+    python3 verify_pool.py <pool_host> <pool_port> --analyze
 
 Examples:
     python3 verify_pool.py solo.atlaspool.io 3333
     python3 verify_pool.py solo.atlaspool.io 3333 bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh
     python3 verify_pool.py solo.ckpool.org 3333 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa
     python3 verify_pool.py solo.ckpool.org 3333 -a
+    python3 verify_pool.py solo-ca.solohash.co.uk 3333 --analyze
 
 What You'll See:
     • Block height being mined
@@ -43,9 +56,11 @@ What You'll See:
     • All coinbase outputs with amounts, types, hashes, and full addresses
     • Payout breakdown showing percentage split (e.g., 98% miner, 2% pool fee)
     • OP_RETURN witness commitment (SegWit metadata, 0 BTC)
+    • Connection timing metrics (with --analyze)
+    • Architecture analysis (with --analyze)
     • Verification result: ✅ Found, ⚠️ Unknown, or ❌ Not Found
 
-Version: 1.1
+Version: 1.2
 """
 
 import socket
@@ -54,7 +69,8 @@ import sys
 import time
 import binascii
 import argparse
-from typing import Optional, Tuple
+import statistics
+from typing import Optional, Tuple, Dict, List
 
 
 def connect_and_subscribe(host: str, port: int, timeout: int = 10) -> Tuple[Optional[socket.socket], Optional[dict]]:
@@ -181,21 +197,32 @@ def authorize_worker(sock: socket.socket, username: str, password: str = "x") ->
         return False, None
 
 
-def wait_for_mining_notify(sock: socket.socket, timeout: int = 15) -> Optional[dict]:
+def wait_for_mining_notify(sock: socket.socket, timeout: int = 15, retry_count: int = 0) -> Optional[dict]:
     """
     Wait for mining.notify message containing the block template.
     Returns the notify params or None.
+    
+    Args:
+        sock: Socket connection to pool
+        timeout: Timeout in seconds
+        retry_count: Current retry attempt (for display purposes)
     """
     try:
         sock.settimeout(timeout)
         
+        if retry_count > 0:
+            print(f"    Retry {retry_count}...")
+        
         # May need to receive multiple messages
         buffer = ""
+        start_time = time.time()
+        
         while True:
             try:
                 chunk = sock.recv(8192).decode('utf-8')
             except socket.timeout:
-                print("    Timeout - no mining.notify received")
+                elapsed = time.time() - start_time
+                print(f"    Timeout after {elapsed:.1f}s - no mining.notify received")
                 return None
                 
             if not chunk:
@@ -212,6 +239,9 @@ def wait_for_mining_notify(sock: socket.socket, timeout: int = 15) -> Optional[d
                         
                         # Look for mining.notify
                         if data.get('method') == 'mining.notify':
+                            elapsed = time.time() - start_time
+                            if retry_count > 0:
+                                print(f"    ✓ Received after {elapsed:.1f}s (retry {retry_count})")
                             return data.get('params')
                         
                         # Also check for mining.set_difficulty
@@ -224,7 +254,7 @@ def wait_for_mining_notify(sock: socket.socket, timeout: int = 15) -> Optional[d
         return None
         
     except Exception as e:
-        print(f"Error receiving notify: {e}")
+        print(f"    Error receiving notify: {e}")
         return None
 
 
@@ -316,21 +346,20 @@ def parse_coinbase_script_suffix(coinb2_hex: str) -> dict:
     """
     Parse the suffix of the coinbase script from coinb2.
     
-    Coinb2 structure:
-    - [Continuation of coinbase script - pool signature, etc.]
-    - Sequence (4 bytes, 0xffffffff)
-    - Output count (varint)
-    - Outputs...
+    Coinb2 structure varies by pool:
+    - Standard: [script_suffix][sequence 0xffffffff][output_count][outputs]
+    - SoloHash: [script_suffix][sequence 0x00000000][output_count][outputs]
     
-    The pool signature (like "ckpool") is typically at the beginning of coinb2.
+    The pool signature (like "ckpool", "Mined by SoloHash.co.uk") is typically 
+    at the beginning of coinb2.
     """
     try:
         coinb2_bytes = binascii.unhexlify(coinb2_hex)
         
-        # Find the sequence marker (0xffffffff) which marks end of script
+        # Find the sequence marker (0xffffffff or 0x00000000) which marks end of script
         sequence_pos = -1
         for i in range(len(coinb2_bytes) - 3):
-            if coinb2_bytes[i:i+4] == b'\xff\xff\xff\xff':
+            if coinb2_bytes[i:i+4] == b'\xff\xff\xff\xff' or coinb2_bytes[i:i+4] == b'\x00\x00\x00\x00':
                 sequence_pos = i
                 break
         
@@ -375,12 +404,97 @@ def parse_coinbase_outputs(coinb2_hex: str, coinb1_hex: str = None) -> list:
     Coinb2 structure varies by pool:
     - Standard: [extranonce][sequence 4][output_count 1][outputs...][locktime 4]
     - zsolo.bid: [value_suffix 5][script_len 1][script][locktime 4] (value split across coinb1/coinb2)
+    - SoloHash: sequence in coinb1, coinb2 = [extranonce][output_count][outputs...][locktime]
     
     Each output: [8 bytes value][1-9 bytes script_len][script]
     """
     try:
         coinb2_bytes = binascii.unhexlify(coinb2_hex)
         outputs = []
+        
+        # Method 0: Check for SoloHash format (sequence marker early in coinb2)
+        # SoloHash format: coinb2 = [script_suffix][sequence 4][output_count 1][outputs][locktime 4]
+        # The sequence marker appears early in coinb2 (after script suffix), not at the end of coinb1
+        try:
+            # Search for sequence marker in coinb2
+            sequence_pos = -1
+            for i in range(min(50, len(coinb2_bytes) - 4)):  # Check first 50 bytes
+                if coinb2_bytes[i:i+4] == b'\x00\x00\x00\x00' or coinb2_bytes[i:i+4] == b'\xff\xff\xff\xff':
+                    # Check if next byte looks like output count (1-20)
+                    if i + 4 < len(coinb2_bytes):
+                        potential_output_count = coinb2_bytes[i+4]
+                        if 1 <= potential_output_count <= 20:
+                            sequence_pos = i
+                            break
+            
+            if sequence_pos != -1:
+                # Found potential SoloHash format
+                output_count = coinb2_bytes[sequence_pos + 4]
+                pos = sequence_pos + 5  # Start of outputs
+                test_pos = pos
+                valid = True
+                
+                # Validate output structure
+                for _ in range(output_count):
+                    if test_pos + 8 > len(coinb2_bytes):
+                        valid = False
+                        break
+                    
+                    value = int.from_bytes(coinb2_bytes[test_pos:test_pos+8], 'little')
+                    test_pos += 8
+                    
+                    if test_pos >= len(coinb2_bytes):
+                        valid = False
+                        break
+                    
+                    script_len = coinb2_bytes[test_pos]
+                    test_pos += 1
+                    
+                    # Sanity check script length
+                    if script_len > 200 or test_pos + script_len > len(coinb2_bytes):
+                        valid = False
+                        break
+                    
+                    test_pos += script_len
+                
+                # Check if we end at locktime (4 bytes remaining)
+                if valid and len(coinb2_bytes) - test_pos == 4:
+                    # This is SoloHash format! Parse the outputs
+                    pos = sequence_pos + 5
+                    
+                    for _ in range(output_count):
+                        if pos + 8 > len(coinb2_bytes):
+                            break
+                        
+                        value = int.from_bytes(coinb2_bytes[pos:pos+8], 'little')
+                        pos += 8
+                        
+                        if pos >= len(coinb2_bytes):
+                            break
+                        
+                        script_len = coinb2_bytes[pos]
+                        pos += 1
+                        
+                        if pos + script_len > len(coinb2_bytes):
+                            break
+                        
+                        script = coinb2_bytes[pos:pos+script_len]
+                        pos += script_len
+                        
+                        addr_type, addr_data = decode_script(script)
+                        
+                        outputs.append({
+                            'value_satoshis': value,
+                            'value_btc': value / 100000000,
+                            'script_hex': script.hex(),
+                            'address_type': addr_type,
+                            'address_data': addr_data
+                        })
+                    
+                    if outputs:
+                        return outputs
+        except:
+            pass  # Fall through to other methods
         
         # Method 1: Check for zsolo.bid format
         # zsolo uses: coinb2 = [output_count 1][extranonce 6][value 8][script_len 1][script][locktime 4]
@@ -995,6 +1109,132 @@ def generate_random_p2wpkh_address() -> str:
     return address
 
 
+def analyze_pool_architecture(host: str, port: int, timeout: int = 15, num_tests: int = 3) -> Dict:
+    """
+    Analyze pool architecture to detect potential proxying or performance issues.
+    
+    Returns dict with:
+        - response_times: List of connection response times
+        - avg_response_time: Average response time in seconds
+        - response_variance: Standard deviation of response times
+        - extranonce_size: Size of extranonce1 in bytes
+        - likely_proxied: Boolean indicating if pool appears to be proxying
+        - indicators: List of strings describing detected indicators
+    """
+    print("\n" + "=" * 70)
+    print("POOL ARCHITECTURE ANALYSIS")
+    print("=" * 70)
+    print(f"\nAnalyzing {host}:{port} with {num_tests} connection tests...")
+    print()
+    
+    response_times = []
+    extranonce_sizes = []
+    indicators = []
+    
+    for i in range(num_tests):
+        print(f"Test {i+1}/{num_tests}...", end=" ")
+        
+        start_time = time.time()
+        sock, subscribe_response = connect_and_subscribe(host, port, timeout)
+        
+        if not sock or not subscribe_response:
+            print("❌ Failed")
+            continue
+        
+        elapsed = time.time() - start_time
+        response_times.append(elapsed)
+        
+        # Get extranonce size
+        if 'result' in subscribe_response and len(subscribe_response['result']) >= 2:
+            extranonce1 = subscribe_response['result'][1]
+            extranonce_size = len(extranonce1) // 2  # Hex string to bytes
+            extranonce_sizes.append(extranonce_size)
+        
+        sock.close()
+        print(f"✓ {elapsed:.3f}s")
+        
+        # Small delay between tests
+        if i < num_tests - 1:
+            time.sleep(0.5)
+    
+    if not response_times:
+        return {
+            'response_times': [],
+            'avg_response_time': None,
+            'response_variance': None,
+            'extranonce_size': None,
+            'likely_proxied': None,
+            'indicators': ['Connection failed - could not analyze']
+        }
+    
+    # Calculate statistics
+    avg_time = statistics.mean(response_times)
+    variance = statistics.stdev(response_times) if len(response_times) > 1 else 0
+    avg_extranonce = statistics.mean(extranonce_sizes) if extranonce_sizes else None
+    
+    # Analyze indicators
+    likely_proxied = False
+    
+    # Indicator 1: High response time variance
+    if variance > 0.5:
+        indicators.append(f"High response variance ({variance:.3f}s) - may indicate proxy layer")
+        likely_proxied = True
+    elif variance > 0.2:
+        indicators.append(f"Moderate response variance ({variance:.3f}s)")
+    else:
+        indicators.append(f"Low response variance ({variance:.3f}s) - consistent performance")
+    
+    # Indicator 2: Slow average response time
+    if avg_time > 1.0:
+        indicators.append(f"Slow average response ({avg_time:.3f}s) - may indicate distant server or proxy")
+        likely_proxied = True
+    elif avg_time > 0.5:
+        indicators.append(f"Moderate response time ({avg_time:.3f}s)")
+    else:
+        indicators.append(f"Fast response time ({avg_time:.3f}s) - direct connection likely")
+    
+    # Indicator 3: Small extranonce space
+    if avg_extranonce and avg_extranonce < 4:
+        indicators.append(f"Small extranonce space ({int(avg_extranonce)} bytes) - may indicate proxy")
+        likely_proxied = True
+    elif avg_extranonce:
+        indicators.append(f"Standard extranonce space ({int(avg_extranonce)} bytes)")
+    
+    # Print results
+    print()
+    print("Results:")
+    print("-" * 70)
+    print(f"Average response time:  {avg_time:.3f}s")
+    print(f"Response variance:      {variance:.3f}s")
+    if avg_extranonce:
+        print(f"Extranonce size:        {int(avg_extranonce)} bytes")
+    print()
+    print("Indicators:")
+    for indicator in indicators:
+        print(f"  • {indicator}")
+    print()
+    
+    if likely_proxied:
+        print("⚠️  ASSESSMENT: Pool may be using proxy layer or load balancer")
+        print("   This doesn't necessarily mean they're proxying to another pool,")
+        print("   but suggests a more complex infrastructure (multiple backend servers,")
+        print("   load balancers, or geographic distribution).")
+    else:
+        print("✓ ASSESSMENT: Pool appears to be direct connection")
+        print("  Fast, consistent responses suggest minimal infrastructure layers.")
+    
+    print("=" * 70)
+    
+    return {
+        'response_times': response_times,
+        'avg_response_time': avg_time,
+        'response_variance': variance,
+        'extranonce_size': int(avg_extranonce) if avg_extranonce else None,
+        'likely_proxied': likely_proxied,
+        'indicators': indicators
+    }
+
+
 def test_all_address_types(host: str, port: int, timeout: int, password: str) -> int:
     """
     Test all 5 Bitcoin address types to see which are supported by the pool.
@@ -1228,6 +1468,13 @@ Examples:
   Test which address types a pool supports:
     python3 verify_pool.py solo.atlaspool.io 3333 -a
     python3 verify_pool.py solo.ckpool.org 3333 --all-types
+  
+  Analyze pool architecture (detect proxying):
+    python3 verify_pool.py solo-ca.solohash.co.uk 3333 --analyze
+    python3 verify_pool.py solo.atlaspool.io 3333 --analyze
+  
+  Test slow pool with increased timeout and retries:
+    python3 verify_pool.py slow-pool.example.com 3333 --timeout 60 --retries 3
 
 Supported address types:
   • P2PKH (Legacy):     1...  (e.g., 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa)
@@ -1247,9 +1494,12 @@ Note: This tool performs a basic verification. For complete security, you should
                         help='Your Bitcoin address (optional - generates random P2WPKH if omitted)')
     parser.add_argument('-a', '--all-types', action='store_true', 
                         help='Test all 5 address types to see which are supported by the pool')
+    parser.add_argument('--analyze', action='store_true',
+                        help='Analyze pool architecture (detect proxying, measure performance)')
     parser.add_argument('--username', help='Username (defaults to your address)')
     parser.add_argument('--password', default='x', help='Password (default: x)')
-    parser.add_argument('--timeout', type=int, default=15, help='Timeout in seconds (default: 15)')
+    parser.add_argument('--timeout', type=int, default=30, help='Timeout in seconds (default: 30)')
+    parser.add_argument('--retries', type=int, default=2, help='Number of retries for slow pools (default: 2)')
     
     args = parser.parse_args()
     
@@ -1257,6 +1507,15 @@ Note: This tool performs a basic verification. For complete security, you should
     if args.all_types and args.address:
         print("Error: Cannot use both --all-types and specify an address", file=sys.stderr)
         sys.exit(1)
+    
+    if args.analyze and args.all_types:
+        print("Error: Cannot use both --analyze and --all-types", file=sys.stderr)
+        sys.exit(1)
+    
+    # Handle --analyze mode
+    if args.analyze:
+        result = analyze_pool_architecture(args.host, args.port, args.timeout)
+        return 0 if result['response_times'] else 1
     
     # Handle --all-types mode
     if args.all_types:
@@ -1364,14 +1623,35 @@ Note: This tool performs a basic verification. For complete security, you should
         print("\n[3/4] Block template received with authorization ✓")
     else:
         print("\n[3/4] Waiting for block template (mining.notify)...")
-        print(f"    (timeout: {args.timeout} seconds)")
+        print(f"    (timeout: {args.timeout} seconds, retries: {args.retries})")
         
-        notify_params = wait_for_mining_notify(sock, args.timeout)
+        # Try with retries for slow pools
+        for retry in range(args.retries + 1):
+            notify_params = wait_for_mining_notify(sock, args.timeout, retry_count=retry)
+            if notify_params:
+                break
+            
+            # If not last retry, reconnect and try again
+            if retry < args.retries:
+                print(f"    Reconnecting for retry {retry + 1}...")
+                sock.close()
+                
+                sock, subscribe_response = connect_and_subscribe(args.host, args.port, args.timeout)
+                if not sock:
+                    print("❌ Reconnection failed")
+                    return 1
+                
+                authorized, notify_params = authorize_worker(sock, username, args.password)
+                if notify_params:
+                    print(f"    ✓ Received on reconnect (retry {retry + 1})")
+                    break
     
     sock.close()
     
     if not notify_params:
-        print("❌ Did not receive mining.notify")
+        print(f"❌ Did not receive mining.notify after {args.retries + 1} attempts")
+        print("    This pool may be very slow or not responding properly.")
+        print("    Try increasing --timeout or --retries, or test a different pool.")
         return 1
     
     print("✓ Received block template")
@@ -1516,7 +1796,11 @@ Note: This tool performs a basic verification. For complete security, you should
         print("\nThe coinbase is paying to:")
         for i, output in enumerate(outputs, 1):
             if output['address_type'] not in ['OP_RETURN', 'unknown']:
-                print(f"  Output #{i}: {output['address_type']} {output['address_data']}")
+                address = hash_to_address(output['address_data'], output['address_type'])
+                if address and address != output['address_data']:
+                    print(f"  Output #{i}: {output['address_type']} → {address}")
+                else:
+                    print(f"  Output #{i}: {output['address_type']} {output['address_data']}")
         print("\n⚠️  WARNING: This pool may not be legitimate solo mining!")
         print("\nPossible reasons:")
         print("  1. The pool is paying to their own address (not solo mining)")
