@@ -32,7 +32,7 @@ Usage:
     # Test single pool
     python3 stratum_test.py solo.atlaspool.io 3333
 
-Version: 1.1
+Version: 1.2
 """
 
 import socket
@@ -74,6 +74,73 @@ PREDEFINED_SERVERS = [
     ("btc.luckymonster.pro", 7112, "LuckyMiner", "US"), # United States
 ]
 
+# Global flag to track if ping is available
+_ping_available = None
+
+def check_ping_available() -> bool:
+    """
+    Check if ping command is available on the system.
+    Returns True if available, False otherwise.
+    """
+    global _ping_available
+    
+    # Return cached result if already checked
+    if _ping_available is not None:
+        return _ping_available
+    
+    try:
+        # Try to run ping with help flag
+        result = subprocess.run(
+            ['ping', '-h'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=2
+        )
+        _ping_available = True
+        return True
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        _ping_available = False
+        return False
+
+
+def show_ping_warning():
+    """
+    Show warning message with OS-specific instructions for installing ping.
+    """
+    system = platform.system().lower()
+    
+    print()
+    print("=" * 70)
+    print("⚠️  WARNING: 'ping' command not found on your system")
+    print("=" * 70)
+    print()
+    print("Ping tests will show as 'BLOCKED' but stratum tests will work normally.")
+    print()
+    print("To install ping:")
+    
+    if system == 'linux':
+        print("  • Debian/Ubuntu/Termux: sudo apt install iputils-ping")
+        print("  • Fedora/RHEL:          sudo dnf install iputils")
+        print("  • Arch Linux:           sudo pacman -S iputils")
+    elif system == 'darwin':
+        print("  • macOS: ping is built-in (check your PATH)")
+    elif system == 'windows':
+        print("  • Windows: ping is built-in (check your PATH)")
+    else:
+        print("  • Install iputils or iputils-ping package for your system")
+    
+    print()
+    print("Press Enter to continue without ping, or Ctrl+C to exit...")
+    print("=" * 70)
+    
+    try:
+        input()
+    except KeyboardInterrupt:
+        print("\n\nExiting...")
+        sys.exit(0)
+    print()
+
+
 def ping_host(hostname: str, timeout: int = 2) -> Optional[float]:
     """
     Perform ICMP ping to hostname and return response time in milliseconds.
@@ -82,6 +149,10 @@ def ping_host(hostname: str, timeout: int = 2) -> Optional[float]:
     Note: Uses TCP connection test as fallback for systems where ICMP ping
     has subprocess issues (e.g., Python 3.9 on macOS).
     """
+    # Check if ping is available (cached after first check)
+    if not check_ping_available():
+        return None
+    
     try:
         system = platform.system().lower()
         
@@ -642,6 +713,10 @@ def test_all_servers(runs: int = 1, verify: bool = False):
     # Print intro
     print_intro()
     
+    # Check if ping is available and warn if not
+    if not check_ping_available():
+        show_ping_warning()
+    
     # Get network info
     ipv4 = get_public_ip()
     asn_info = get_asn_info(ipv4) if ipv4 else None
@@ -692,6 +767,10 @@ def test_single_server(hostname: str, port: int, runs: int = 1):
     """Test a single server"""
     # Print intro
     print_intro()
+    
+    # Check if ping is available and warn if not
+    if not check_ping_available():
+        show_ping_warning()
     
     # Get network info
     ipv4 = get_public_ip()

@@ -358,6 +358,23 @@ For issues or questions:
 
 ## Changelog
 
+### Version 1.2 - November 2025
+
+**Improvements:**
+- Added: Ping availability detection at startup
+- Added: OS-specific installation instructions when ping is missing
+- Added: Clear warning message for systems without ping command
+- Improved: Better user experience on Android/Termux and minimal Linux systems
+- Improved: Script continues to work (stratum tests) even without ping
+
+**User Experience:**
+- Users on systems without ping (Android, minimal containers) now get helpful guidance
+- Installation instructions provided for Debian/Ubuntu/Termux, Fedora, Arch Linux
+- Option to continue without ping or exit to install it first
+
+**Thanks:**
+- Special thanks to an anonymous user from r/BitAxe who reported the issue on Android and helped test the fix!
+
 ### Version 1.1 - November 2025
 
 **New Features:**
