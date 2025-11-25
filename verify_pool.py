@@ -363,24 +363,174 @@ def parse_coinbase_script_suffix(coinb2_hex: str) -> dict:
         return {'error': str(e)}
 
 
-def parse_coinbase_outputs(coinb2_hex: str) -> list:
+def parse_coinbase_outputs(coinb2_hex: str, coinb1_hex: str = None) -> list:
     """
     Parse the outputs from coinbase transaction (coinb2).
     Returns list of output dictionaries.
     
-    Coinb2 structure: [extranonce_placeholder][sequence: 4 bytes][output_count][outputs...][locktime: 4 bytes]
+    Coinb2 structure varies by pool:
+    - Standard: [extranonce][sequence 4][output_count 1][outputs...][locktime 4]
+    - zsolo.bid: [value_suffix 5][script_len 1][script][locktime 4] (value split across coinb1/coinb2)
+    
     Each output: [8 bytes value][1-9 bytes script_len][script]
     """
     try:
         coinb2_bytes = binascii.unhexlify(coinb2_hex)
         outputs = []
         
-        # Find the sequence number (ffffffff) which marks end of input
-        # Then outputs start after that
+        # Method 1: Check for zsolo.bid format
+        # zsolo uses: coinb2 = [output_count 1][extranonce 6][value 8][script_len 1][script][locktime 4]
+        if coinb1_hex and len(coinb2_bytes) >= 16:
+            try:
+                # Check if coinb2[0] looks like output_count (1-10)
+                potential_output_count = coinb2_bytes[0]
+                
+                if 1 <= potential_output_count <= 10:
+                    # Try zsolo format: [output_count 1][extranonce 6][value 8][outputs...]
+                    output_count = potential_output_count
+                    
+                    # Value is at position 7 (after output_count + 6-byte extranonce)
+                    value = int.from_bytes(coinb2_bytes[7:15], 'little')
+                    
+                    # Sanity check: value should be reasonable (0.01 to 100 BTC)
+                    if 1000000 <= value <= 10000000000:
+                        script_len = coinb2_bytes[15]
+                        
+                        # Sanity check script length
+                        if 20 <= script_len <= 50 and len(coinb2_bytes) >= 16 + script_len + 4:
+                            script = coinb2_bytes[16:16+script_len]
+                            
+                            # Verify it's a valid script type
+                            addr_type, addr_data = decode_script(script)
+                            
+                            if addr_type != 'unknown':
+                                # This is zsolo format!
+                                outputs.append({
+                                    'value_satoshis': value,
+                                    'value_btc': value / 100000000,
+                                    'script_hex': script.hex(),
+                                    'address_type': addr_type,
+                                    'address_data': addr_data
+                                })
+                                
+                                # Parse additional outputs if any
+                                pos = 16 + script_len
+                                for _ in range(output_count - 1):
+                                    if pos + 8 > len(coinb2_bytes):
+                                        break
+                                    
+                                    value = int.from_bytes(coinb2_bytes[pos:pos+8], 'little')
+                                    pos += 8
+                                    
+                                    if pos >= len(coinb2_bytes):
+                                        break
+                                    script_len = coinb2_bytes[pos]
+                                    pos += 1
+                                    
+                                    if pos + script_len > len(coinb2_bytes):
+                                        break
+                                    
+                                    script = coinb2_bytes[pos:pos+script_len]
+                                    pos += script_len
+                                    
+                                    addr_type, addr_data = decode_script(script)
+                                    
+                                    outputs.append({
+                                        'value_satoshis': value,
+                                        'value_btc': value / 100000000,
+                                        'script_hex': script.hex(),
+                                        'address_type': addr_type,
+                                        'address_data': addr_data
+                                    })
+                                
+                                return outputs
+            except:
+                pass  # Fall back to other methods
+        
+        # Method 2: Standard format with sequence marker search
+        # Try to find where outputs start by looking for sequence and testing positions
+        if coinb1_hex:
+            try:
+                coinb1_bytes = binascii.unhexlify(coinb1_hex)
+                
+                if len(coinb1_bytes) >= 42:
+                    script_len = coinb1_bytes[41]
+                    script_in_coinb1 = len(coinb1_bytes) - 42
+                    script_remaining = max(0, script_len - script_in_coinb1)
+                    
+                    # Try different extranonce sizes
+                    for extranonce_size in [8, 4, 12, 16, 0]:
+                        pos = script_remaining + extranonce_size + 4  # script + extranonce + sequence
+                        
+                        if pos >= len(coinb2_bytes):
+                            continue
+                        
+                        output_count = coinb2_bytes[pos]
+                        
+                        if output_count > 0 and output_count <= 20:
+                            test_pos = pos + 1
+                            valid = True
+                            
+                            for _ in range(output_count):
+                                if test_pos + 8 > len(coinb2_bytes):
+                                    valid = False
+                                    break
+                                
+                                value = int.from_bytes(coinb2_bytes[test_pos:test_pos+8], 'little')
+                                test_pos += 8
+                                
+                                if test_pos >= len(coinb2_bytes):
+                                    valid = False
+                                    break
+                                    
+                                script_len_out = coinb2_bytes[test_pos]
+                                test_pos += 1
+                                
+                                if script_len_out > 200 or test_pos + script_len_out > len(coinb2_bytes):
+                                    valid = False
+                                    break
+                                
+                                test_pos += script_len_out
+                            
+                            if valid and len(coinb2_bytes) - test_pos <= 4:
+                                pos += 1
+                                
+                                for _ in range(output_count):
+                                    if pos + 8 > len(coinb2_bytes):
+                                        break
+                                    
+                                    value = int.from_bytes(coinb2_bytes[pos:pos+8], 'little')
+                                    pos += 8
+                                    
+                                    if pos >= len(coinb2_bytes):
+                                        break
+                                    script_len_out = coinb2_bytes[pos]
+                                    pos += 1
+                                    
+                                    if pos + script_len_out > len(coinb2_bytes):
+                                        break
+                                    
+                                    script = coinb2_bytes[pos:pos+script_len_out]
+                                    pos += script_len_out
+                                    
+                                    addr_type, addr_data = decode_script(script)
+                                    
+                                    outputs.append({
+                                        'value_satoshis': value,
+                                        'value_btc': value / 100000000,
+                                        'script_hex': script.hex(),
+                                        'address_type': addr_type,
+                                        'address_data': addr_data
+                                    })
+                                
+                                return outputs
+            except:
+                pass
+        
+        # Method 2: Search for standard sequence marker (0xffffffff)
         pos = 0
         found_sequence = False
         
-        # Look for ffffffff (sequence number)
         for i in range(len(coinb2_bytes) - 4):
             if coinb2_bytes[i:i+4] == b'\xff\xff\xff\xff':
                 pos = i + 4  # Start after sequence
@@ -901,8 +1051,9 @@ def test_all_address_types(host: str, port: int, timeout: int, password: str) ->
             continue
         
         # Parse outputs
+        coinb1 = notify_params[2]
         coinb2 = notify_params[3]
-        outputs = parse_coinbase_outputs(coinb2)
+        outputs = parse_coinbase_outputs(coinb2, coinb1)
         
         if not outputs:
             print(f"  ⚠️  Authorized but could not parse outputs")
@@ -1181,7 +1332,7 @@ Note: This tool performs a basic verification. For complete security, you should
     print("\n[5/5] Parsing coinbase transaction outputs...")
     
     # Parse the outputs from coinb2
-    outputs = parse_coinbase_outputs(coinb2)
+    outputs = parse_coinbase_outputs(coinb2, coinb1)
     
     if not outputs:
         print("❌ Could not parse coinbase outputs")
