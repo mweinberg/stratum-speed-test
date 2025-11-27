@@ -16,7 +16,9 @@ By monitoring 16 Bitcoin mining pools simultaneously over 11 minutes, we discove
 - ✗ All 3 scam pools (LuckyMonster US, LuckyMonster EU, zsolo.bid) stayed stuck on a different prevhash
 - ✗ Scam pools never updated when the new block was found
 
-**This proves the scam pools are not on the real Bitcoin blockchain and miners are wasting 100% of their hashrate.**
+**CRITICAL DISCOVERY:** By converting the scam pool prevhash to big-endian format and searching blockchain explorers, we found it on the **Bitcoin Cash (BCH) blockchain**, not Bitcoin (BTC). 
+
+**This proves LuckyMonster and zsolo.bid are mining Bitcoin Cash while claiming to mine Bitcoin, stealing 100% of miners' hashrate for their own BCH rewards.**
 
 ## Running the Test Yourself
 
