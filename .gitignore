@@ -24,3 +24,6 @@ Thumbs.db
 # Test results
 results.json
 *.log
+
+# Scratch/temporary development files
+scratch/

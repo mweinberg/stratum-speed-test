@@ -11,3 +11,4 @@ parasite.wtf	42069
 public-pool.io	21496
 solo.cat	3333
 solo-ca.solohash.co.uk	3333
+eu3.solopool.org 8005
