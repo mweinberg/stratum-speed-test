@@ -6,11 +6,9 @@ eu.findmyblock.xyz	3335
 solo-de.solohash.co.uk	3333
 solo.solohash.co.uk	3333
 pool.solomining.de	3333
-btc-eu.luckymonster.pro	7112
-btc.zsolo.bid	6057
 solo.ckpool.org	3333
 parasite.wtf	42069
 public-pool.io	21496
 solo.cat	3333
 solo-ca.solohash.co.uk	3333
-btc.luckymonster.pro	7112
+eu3.solopool.org 8005
