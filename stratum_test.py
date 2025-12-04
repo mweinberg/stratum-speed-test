@@ -7,9 +7,10 @@ to help you find the fastest pool from your location. Measures both network
 latency (ping) and actual stratum protocol handshake times.
 
 Features:
-  • Tests 16 popular solo mining pools worldwide
+  • Tests 20 popular solo mining pools worldwide
   • Concurrent testing for fast results (~10 seconds)
   • Multiple runs for accuracy (--runs 1-3)
+  • TLS connection testing (-t/--tls flag) for secure stratum connections
   • Address type verification (-v flag) tests all 5 Bitcoin address formats:
     - P2PKH (Legacy): 1...
     - P2SH (Script Hash): 3...
@@ -23,6 +24,9 @@ Usage:
     # Test all pools
     python3 stratum_test.py
     
+    # Test with TLS support
+    python3 stratum_test.py -t
+    
     # Test with verification
     python3 stratum_test.py -v
     
@@ -31,8 +35,11 @@ Usage:
     
     # Test single pool
     python3 stratum_test.py solo.atlaspool.io 3333
+    
+    # Test single pool with TLS
+    python3 stratum_test.py public-pool.io 3333 -t
 
-Version: 1.2
+Version: 1.3
 """
 
 import socket
@@ -50,35 +57,52 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from statistics import mean, median
 
 # Predefined servers for auto mode
-# Format: (hostname, port, display_name, location)
-# Location codes: AU=Australia, DE=Germany, RU=Russia, US=United States, *MANY*=Anycast (multiple locations)
+# Each entry is a tuple with the following fields:
+#   1. hostname (str): The server's hostname or IP address
+#   2. port (int): The standard stratum port (typically 3333)
+#   3. tls_port (int): The TLS-enabled stratum port (0 = no TLS support)
+#   4. display_name (str): Human-readable name shown in results
+#   5. location (str): Country code (ISO 3166-1 alpha-2) or "*MANY*" for Anycast
+#
+# Location codes: AU=Australia, CH=Switzerland, DE=Germany, FR=France, NL=Netherlands,
+#                 RU=Russia, UK=United Kingdom, US=United States, *MANY*=Anycast (multiple locations)
 PREDEFINED_SERVERS = [
-    ("solo.atlaspool.io", 3333, "AtlasPool.io", "*MANY*"),  # Anycast - Global edge network
-    ("ausolo.ckpool.org", 3333, "AU CKPool", "AU"),      # Australia
-    ("stratum.kano.is", 3333, "KanoPool", "US"),          # United States
-    ("eusolo.ckpool.org", 3333, "EU CKPool", "DE"),      # Germany
-    ("eu.findmyblock.xyz", 3335, "FindMyBlock", "FR"),    # France
-    ("solo-de.solohash.co.uk", 3333, "DE SoloHash", "DE"),    # Germany
-    ("solo.solohash.co.uk", 3333, "UK SoloHash", "UK"),    # UK
-    ("pool.solomining.de", 3333, "SoloMining.de", "DE"),    # Germany
+    ("solo.atlaspool.io", 3333, 4333, "AtlasPool.io", "*MANY*"),  # Anycast - Global edge network
+    ("ausolo.ckpool.org", 3333, 0, "AU CKPool", "AU"),      # Australia
+    ("stratum.kano.is", 3333, 0, "KanoPool", "US"),          # United States
+    ("eusolo.ckpool.org", 3333, 0, "EU CKPool", "DE"),      # Germany
+    ("eu.findmyblock.xyz", 3335, 0, "FindMyBlock", "FR"),    # France
+    ("solo-de.solohash.co.uk", 3333, 0, "DE SoloHash", "DE"),    # Germany
+    ("solo.solohash.co.uk", 3333, 0, "UK SoloHash", "UK"),    # UK
+    ("pool.solomining.de", 3333, 0, "SoloMining.de", "DE"),    # Germany
     
-    ("blitzpool.yourdevice.ch", 3333, "Blitzpool", "CH"),  # Switzerland
-    ("pool.sunnydecree.de", 3333, "Sunnydecree Pool", "DE"),  # Germany
-    ("pool.nerdminer.de", 3333, "Nerdminer.de", "DE"),  # Germany
-    ("pool.noderunners.network", 1337, "Noderunners", "NL"),  # Netherlands
-    ("pool.satoshiradio.nl", 3333, "Satoshi Radio", "NL"),  # Netherlands
-    ("solo.stratum.braiins.com", 3333, "Braiins Solo", "DE"),  # Germany
-    ("de.kano.is", 3333, "KanoPool DE", "DE"),  # Germany
+    ("blitzpool.yourdevice.ch", 3333, 0, "Blitzpool", "CH"),  # Switzerland
+    ("pool.sunnydecree.de", 3333, 0, "Sunnydecree Pool", "DE"),  # Germany
+    ("pool.nerdminer.de", 3333, 0, "Nerdminer.de", "DE"),  # Germany
+    ("pool.noderunners.network", 1337, 1336, "Noderunners", "DE"),  # Germany
+    ("pool.satoshiradio.nl", 3333, 0, "Satoshi Radio", "NL"),  # Netherlands
+    ("solo.stratum.braiins.com", 3333, 0, "Braiins Solo", "DE"),  # Germany
+    ("de.kano.is", 3333, 0, "KanoPool DE", "DE"),  # Germany
  
-    ("solo.ckpool.org", 3333, "US CKPool", "US"),          # United States
-    ("parasite.wtf", 42069, "Parasite Pool", "US"),          # United States
-    ("public-pool.io", 21496, "Public Pool", "US"),           # United States
-    ("solo.cat", 3333, "solo.cat", "US"),                        # United States
-    ("solo-ca.solohash.co.uk", 3333, "US SoloHash", "US"),                        # United States
+    ("solo.ckpool.org", 3333, 0, "US CKPool", "US"),          # United States
+    ("parasite.wtf", 42069, 0, "Parasite Pool", "US"),          # United States
+    ("public-pool.io", 3333, 4333, "Public Pool", "US"),           # United States
+    ("solo.cat", 3333, 0, "solo.cat", "US"),                        # United States
+    ("solo-ca.solohash.co.uk", 3333, 0, "US SoloHash", "US"),                        # United States
 ]
 
 # Global flag to track if ping is available
 _ping_available = None
+
+def lookup_predefined_server(hostname: str) -> Optional[Tuple[int, int, str, str]]:
+    """
+    Look up server info from PREDEFINED_SERVERS by hostname.
+    Returns (port, tls_port, display_name, country_code) if found, None otherwise.
+    """
+    for host, port, tls_port, display_name, country_code in PREDEFINED_SERVERS:
+        if host == hostname:
+            return (port, tls_port, display_name, country_code)
+    return None
 
 def check_ping_available() -> bool:
     """
@@ -256,6 +280,48 @@ def test_stratum_connection(hostname: str, port: int, timeout: int = 5) -> Optio
                 json.loads(response.decode('utf-8'))
             except json.JSONDecodeError:
                 pass
+        
+        return elapsed_time
+        
+    except:
+        return None
+
+def test_stratum_tls_connection(hostname: str, port: int, timeout: int = 5) -> Optional[float]:
+    """
+    Test stratum server TLS connection and return response time in milliseconds.
+    Returns None if connection fails.
+    """
+    try:
+        import ssl
+        
+        # Create SSL context
+        context = ssl.create_default_context()
+        
+        # Create socket and wrap with TLS
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        
+        start_time = time.time()
+        
+        # Connect and perform TLS handshake
+        with context.wrap_socket(sock, server_hostname=hostname) as tls_sock:
+            tls_sock.connect((hostname, port))
+            
+            subscribe_msg = json.dumps({
+                "id": 1,
+                "method": "mining.subscribe",
+                "params": []
+            }) + "\n"
+            
+            tls_sock.sendall(subscribe_msg.encode('utf-8'))
+            response = tls_sock.recv(4096)
+            elapsed_time = (time.time() - start_time) * 1000
+            
+            if response:
+                try:
+                    json.loads(response.decode('utf-8'))
+                except json.JSONDecodeError:
+                    pass
         
         return elapsed_time
         
@@ -458,10 +524,12 @@ def test_address_types(hostname: str, port: int) -> Dict[str, Optional[bool]]:
 
 
 def test_server_multiple_runs(hostname: str, port: int, display_name: str, 
-                               runs: int, country_code: str = "??", verify: bool = False) -> Dict:
+                               runs: int, country_code: str = "??", verify: bool = False,
+                               tls_port: int = 0, test_tls: bool = False) -> Dict:
     """Test a server multiple times and return statistics"""
     ping_times = []
     stratum_times = []
+    tls_times = []
     
     for _ in range(runs):
         ping_time = ping_host(hostname)
@@ -472,6 +540,12 @@ def test_server_multiple_runs(hostname: str, port: int, display_name: str,
         if stratum_time is not None:
             stratum_times.append(stratum_time)
         
+        # Test TLS if requested and port is available
+        if test_tls and tls_port > 0:
+            tls_time = test_stratum_tls_connection(hostname, tls_port)
+            if tls_time is not None:
+                tls_times.append(tls_time)
+        
         # Small delay between runs
         if runs > 1:
             time.sleep(0.1)
@@ -479,10 +553,12 @@ def test_server_multiple_runs(hostname: str, port: int, display_name: str,
     result = {
         'hostname': hostname,
         'port': port,
+        'tls_port': tls_port,
         'display_name': display_name,
         'country_code': country_code,
         'ping_times': ping_times,
-        'stratum_times': stratum_times
+        'stratum_times': stratum_times,
+        'tls_times': tls_times
     }
     
     # Optionally test address type compatibility
@@ -526,13 +602,34 @@ def format_time_for_result(result: Dict, use_ping: bool = False) -> str:
     else:
         return format_time_multi(times)
 
-def print_table(results: List[Dict], runs: int, verify: bool = False):
+def format_time_for_tls(result: Dict) -> str:
+    """Format TLS time from result dict"""
+    tls_port = result.get('tls_port', 0)
+    tls_times = result.get('tls_times', [])
+    
+    # If no TLS port configured
+    if tls_port == 0:
+        return "N/A"
+    
+    # If TLS port exists but no successful times
+    if not tls_times:
+        return "FAILED"
+    
+    if len(tls_times) == 1:
+        return format_time_single(tls_times[0])
+    else:
+        return format_time_multi(tls_times)
+
+def print_table(results: List[Dict], runs: int, verify: bool = False, show_tls: bool = False):
     """Print results in a formatted ASCII table"""
     if not results:
         return
     
     # Check if verification was performed
     has_verification = verify and any('address_types' in r for r in results)
+    
+    # Check if TLS testing was performed
+    has_tls = show_tls and any(r.get('tls_times') for r in results)
     
     # Calculate column widths
     max_name_len = max(len(r['display_name']) for r in results)
@@ -555,6 +652,14 @@ def print_table(results: List[Dict], runs: int, verify: bool = False):
     stratum_width = max(len(v) for v in stratum_values)
     stratum_width = max(stratum_width, len("Stratum (ms)"))
     
+    # TLS column width
+    tls_width = 0
+    tls_values = []
+    if has_tls:
+        tls_values = [format_time_for_tls(r) for r in results]
+        tls_width = max(len(v) for v in tls_values)
+        tls_width = max(tls_width, len("TLS (ms)"))
+    
     # Address type column widths (if verification enabled)
     addr_widths = {}
     if has_verification:
@@ -564,6 +669,8 @@ def print_table(results: List[Dict], runs: int, verify: bool = False):
     
     # Build separator
     separator = f"+{'-' * (max_name_len + 2)}+{'-' * (country_width + 2)}+{'-' * (max_host_len + 2)}+{'-' * (port_width + 2)}+{'-' * (ping_width + 2)}+{'-' * (stratum_width + 2)}+"
+    if has_tls:
+        separator += f"+{'-' * (tls_width + 2)}+"
     if has_verification:
         for addr_type in addr_types:
             separator += f"+{'-' * (addr_widths[addr_type] + 2)}+"
@@ -572,6 +679,8 @@ def print_table(results: List[Dict], runs: int, verify: bool = False):
     
     # Header
     header_line = f"| {'Pool Name'.ljust(max_name_len)} | {'CC'.ljust(country_width)} | {'Host'.ljust(max_host_len)} | {'Port'.ljust(port_width)} | {'Ping (ms)'.ljust(ping_width)} | {'Stratum (ms)'.ljust(stratum_width)} |"
+    if has_tls:
+        header_line += f" {'TLS (ms)'.ljust(tls_width)} |"
     if has_verification:
         for addr_type in addr_types:
             header_line += f" {addr_type.ljust(addr_widths[addr_type])} |"
@@ -579,6 +688,8 @@ def print_table(results: List[Dict], runs: int, verify: bool = False):
     
     if runs > 1:
         subheader = f"| {' '.ljust(max_name_len)} | {' '.ljust(country_width)} | {' '.ljust(max_host_len)} | {' '.ljust(port_width)} | {'Avg (Min-Max)'.ljust(ping_width)} | {'Avg (Min-Max)'.ljust(stratum_width)} |"
+        if has_tls:
+            subheader += f" {'Avg (Min-Max)'.ljust(tls_width)} |"
         if has_verification:
             for addr_type in addr_types:
                 subheader += f" {' '.ljust(addr_widths[addr_type])} |"
@@ -593,6 +704,11 @@ def print_table(results: List[Dict], runs: int, verify: bool = False):
         stratum_str = stratum_values[i].ljust(stratum_width)
         
         row = f"| {result['display_name'].ljust(max_name_len)} | {country_code} | {result['hostname'].ljust(max_host_len)} | {str(result['port']).ljust(port_width)} | {ping_str} | {stratum_str} |"
+        
+        # Add TLS column
+        if has_tls:
+            tls_str = tls_values[i].ljust(tls_width)
+            row += f" {tls_str} |"
         
         # Add verification columns
         if has_verification:
@@ -711,7 +827,7 @@ def print_network_info(ipv4: Optional[str], asn_info: Optional[Dict]):
         elif asn_info.get('asn'):
             print(f"Network: {asn_info['asn']}")
 
-def test_all_servers(runs: int = 1, verify: bool = False):
+def test_all_servers(runs: int = 1, verify: bool = False, test_tls: bool = False):
     """Test all predefined servers with concurrent execution"""
     # Print intro
     print_intro()
@@ -729,7 +845,8 @@ def test_all_servers(runs: int = 1, verify: bool = False):
     
     # Test servers
     verify_msg = " with address type verification" if verify else ""
-    print(f"\nTesting {len(PREDEFINED_SERVERS)} servers (runs: {runs}){verify_msg}...")
+    tls_msg = " with TLS testing" if test_tls else ""
+    print(f"\nTesting {len(PREDEFINED_SERVERS)} servers (runs: {runs}){verify_msg}{tls_msg}...")
     if verify:
         print("  Note: Verification adds ~10 seconds per server")
         print("  Using reduced concurrency (4 servers at a time) for reliability")
@@ -740,8 +857,8 @@ def test_all_servers(runs: int = 1, verify: bool = False):
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(test_server_multiple_runs, host, port, name, runs, cc, verify): (host, port, name, cc)
-            for host, port, name, cc in PREDEFINED_SERVERS
+            executor.submit(test_server_multiple_runs, host, port, name, runs, cc, verify, tls_port, test_tls): (host, port, tls_port, name, cc)
+            for host, port, tls_port, name, cc in PREDEFINED_SERVERS
         }
         
         completed = 0
@@ -761,12 +878,12 @@ def test_all_servers(runs: int = 1, verify: bool = False):
     ))
     
     print("\nResults:")
-    print_table(results, runs, verify)
+    print_table(results, runs, verify, test_tls)
     print_summary(results)
     
     print()
 
-def test_single_server(hostname: str, port: int, runs: int = 1):
+def test_single_server(hostname: str, port: int, runs: int = 1, test_tls: bool = False, tls_port: int = 0):
     """Test a single server"""
     # Print intro
     print_intro()
@@ -781,15 +898,27 @@ def test_single_server(hostname: str, port: int, runs: int = 1):
     
     print_network_info(ipv4, asn_info)
     
+    # Look up server info from predefined list
+    server_info = lookup_predefined_server(hostname)
+    if server_info:
+        _, predefined_tls_port, display_name, country_code = server_info
+        # Use predefined TLS port if not explicitly specified
+        if test_tls and tls_port == 0:
+            tls_port = predefined_tls_port
+    else:
+        display_name = hostname
+        country_code = "??"
+    
     # Test server
-    print(f"\nTesting {hostname}:{port} (runs: {runs})...")
-    result = test_server_multiple_runs(hostname, port, hostname, runs)
+    tls_msg = f" with TLS on port {tls_port}" if test_tls and tls_port > 0 else ""
+    print(f"\nTesting {hostname}:{port} (runs: {runs}){tls_msg}...")
+    result = test_server_multiple_runs(hostname, port, display_name, runs, country_code, False, tls_port, test_tls)
     print("\nResults:")
-    print_table([result], runs)
+    print_table([result], runs, False, test_tls)
     
     print()
 
-def output_json(runs: int = 1):
+def output_json(runs: int = 1, test_tls: bool = False):
     """Output results in JSON format"""
     # Get network info
     ipv4 = get_public_ip()
@@ -804,27 +933,33 @@ def output_json(runs: int = 1):
             'provider': asn_info.get('provider') if asn_info else None
         },
         'runs': runs,
+        'tls_tested': test_tls,
         'results': []
     }
     
     # Test servers
     with ThreadPoolExecutor(max_workers=len(PREDEFINED_SERVERS)) as executor:
         futures = [
-            executor.submit(test_server_multiple_runs, host, port, name, runs, cc)
-            for host, port, name, cc in PREDEFINED_SERVERS
+            executor.submit(test_server_multiple_runs, host, port, name, runs, cc, False, tls_port, test_tls)
+            for host, port, tls_port, name, cc in PREDEFINED_SERVERS
         ]
         for future in as_completed(futures):
             result = future.result()
-            output['results'].append({
+            result_data = {
                 'host': result['hostname'],
                 'port': result['port'],
+                'tls_port': result.get('tls_port', 0),
                 'display_name': result['display_name'],
                 'country_code': result.get('country_code', '??'),
                 'ping_ms': result['ping_times'],
                 'stratum_ms': result['stratum_times'],
                 'ping_avg': mean(result['ping_times']) if result['ping_times'] else None,
                 'stratum_avg': mean(result['stratum_times']) if result['stratum_times'] else None
-            })
+            }
+            if test_tls:
+                result_data['tls_ms'] = result.get('tls_times', [])
+                result_data['tls_avg'] = mean(result['tls_times']) if result.get('tls_times') else None
+            output['results'].append(result_data)
     
     print(json.dumps(output, indent=2))
 
@@ -840,11 +975,18 @@ Examples:
   Test with 3 runs for accuracy:
     python stratum_test.py --runs 3
   
+  Test with TLS support:
+    python stratum_test.py -t
+    python stratum_test.py --tls
+  
   Output JSON format:
     python stratum_test.py --json
   
   Test single server:
     python stratum_test.py solo.atlaspool.io 3333
+  
+  Test single server with TLS:
+    python stratum_test.py solo.atlaspool.io 3333 -t 4333
   
   Test single server with 2 runs:
     python stratum_test.py solo.atlaspool.io 3333 --runs 2
@@ -861,6 +1003,9 @@ Examples:
                         help='Test all 5 Bitcoin address types (P2PKH, P2SH, P2WPKH, P2WSH, P2TR) to verify '
                              'which formats each pool accepts. This confirms the pool will pay block rewards '
                              'to your address type. See verify_pool.py for detailed verification. (adds ~10s per server)')
+    parser.add_argument('-t', '--tls', nargs='?', type=int, const=0, metavar='TLS_PORT',
+                        help='Test TLS stratum connections. For predefined servers, uses configured TLS ports. '
+                             'For single server test, specify TLS port number (e.g., -t 4333)')
     parser.add_argument('--json', action='store_true',
                         help='Output results in JSON format')
     
@@ -871,19 +1016,31 @@ Examples:
         print("Error: --json cannot be used with single server test", file=sys.stderr)
         sys.exit(1)
     
+    # Determine if TLS testing is enabled
+    test_tls = args.tls is not None
+    tls_port = args.tls if args.tls else 0
+    
     # Single server test
     if args.hostname and args.port:
-        test_single_server(args.hostname, args.port, args.runs)
+        # Check if TLS port is needed
+        if test_tls and tls_port == 0:
+            # Look up if this is a predefined server with TLS support
+            server_info = lookup_predefined_server(args.hostname)
+            if not server_info or server_info[1] == 0:
+                # Not in predefined list or no TLS support configured
+                print("Error: TLS port must be specified for single server TLS test (e.g., -t 4333)", file=sys.stderr)
+                sys.exit(1)
+        test_single_server(args.hostname, args.port, args.runs, test_tls, tls_port)
     elif args.hostname or args.port:
         print("Error: Both hostname and port must be provided for single server test", file=sys.stderr)
         parser.print_help()
         sys.exit(1)
     # JSON output
     elif args.json:
-        output_json(args.runs)
+        output_json(args.runs, test_tls)
     # Default: test all servers
     else:
-        test_all_servers(args.runs, args.verify)
+        test_all_servers(args.runs, args.verify, test_tls)
 
 if __name__ == "__main__":
     main()
