@@ -50,6 +50,24 @@ Test all preconfigured pools with 1 run each:
 python3 stratum_test.py  # or just 'python' on some systems
 ```
 
+### TLS Connection Testing (New in v1.3)
+
+Test secure TLS stratum connections for pools that support it:
+
+```bash
+python stratum_test.py -t
+```
+
+This tests both regular and TLS connections, showing response times for each. TLS results appear in an additional column:
+- **Number** = TLS connection time in milliseconds
+- **N/A** = Pool doesn't support TLS
+- **FAILED** = TLS connection failed
+
+**TLS-enabled pools:**
+- AtlasPool.io (port 4333)
+- Public Pool (port 4333)
+- Noderunners (port 1336)
+
 ### Address Type Verification (New in v1.1)
 
 Test which Bitcoin address types each pool supports:
@@ -100,6 +118,12 @@ python stratum_test.py solo.ckpool.org 3333
 
 # Test with multiple runs for better accuracy
 python stratum_test.py solo.atlaspool.io 3333 --runs 3
+
+# Test with TLS (for predefined servers, TLS port is auto-detected)
+python stratum_test.py public-pool.io 3333 -t
+
+# Test with TLS on custom port
+python stratum_test.py solo.atlaspool.io 3333 -t 4333
 ```
 
 **Important:** Both hostname and port must be provided. The script will show an error if only one is specified.
@@ -140,23 +164,32 @@ python stratum_test.py --runs 3 --json > results.json
 
 ## Preconfigured Mining Pools
 
-The script includes 16 popular Bitcoin solo mining pools.  This list is not exhaustive, and the author intends no slight to any missing pools!  Feel free to submit a pull request or comment on other solo mining pools which should be considered for inclusion.
+The script includes 20 popular Bitcoin solo mining pools.  This list is not exhaustive, and the author intends no slight to any missing pools!  Feel free to submit a pull request or comment on other solo mining pools which should be considered for inclusion.
 
 ### Global/Anycast
-- **AtlasPool.io** - `solo.atlaspool.io:3333` (Global edge network)
+- **AtlasPool.io** - `solo.atlaspool.io:3333` (TLS: 4333) - Global edge network
 
 ### Australia (AU)
 - **AU CKPool** - `ausolo.ckpool.org:3333`
+
+### Switzerland (CH)
+- **Blitzpool** - `blitzpool.yourdevice.ch:3333`
 
 ### Germany (DE)
 - **EU CKPool** - `eusolo.ckpool.org:3333`
 - **DE SoloHash** - `solo-de.solohash.co.uk:3333`
 - **SoloMining.de** - `pool.solomining.de:3333`
+- **Sunnydecree Pool** - `pool.sunnydecree.de:3333`
+- **Nerdminer.de** - `pool.nerdminer.de:3333`
+- **Noderunners** - `pool.noderunners.network:1337` (TLS: 1336)
+- **Braiins Solo** - `solo.stratum.braiins.com:3333`
+- **KanoPool DE** - `de.kano.is:3333`
 
 ### France (FR)
 - **FindMyBlock** - `eu.findmyblock.xyz:3335`
-- **EU LuckyMonster** - `btc-eu.luckymonster.pro:7112`
-- **zSolo** - `btc.zsolo.bid:6057`
+
+### Netherlands (NL)
+- **Satoshi Radio** - `pool.satoshiradio.nl:3333`
 
 ### United Kingdom (UK)
 - **UK SoloHash** - `solo.solohash.co.uk:3333`
@@ -165,10 +198,9 @@ The script includes 16 popular Bitcoin solo mining pools.  This list is not exha
 - **US CKPool** - `solo.ckpool.org:3333`
 - **KanoPool** - `stratum.kano.is:3333`
 - **Parasite Pool** - `parasite.wtf:42069`
-- **Public Pool** - `public-pool.io:21496`
+- **Public Pool** - `public-pool.io:3333` (TLS: 4333)
 - **solo.cat** - `solo.cat:3333`
 - **US SoloHash** - `solo-ca.solohash.co.uk:3333`
-- **LuckyMiner** - `btc.luckymonster.pro:7112`
 
 ## Example Output
 
@@ -258,12 +290,13 @@ To permanently add a pool, edit the `PREDEFINED_SERVERS` list in the script:
 
 ```python
 PREDEFINED_SERVERS = [
-    ("your.pool.com", 3333, "Your Pool Name", "US"),
+    ("your.pool.com", 3333, 4333, "Your Pool Name", "US"),
     # ... other servers
 ]
 ```
 
-Format: `(hostname, port, display_name, country_code)`
+Format: `(hostname, port, tls_port, display_name, country_code)`
+- Set `tls_port` to `0` if the pool doesn't support TLS
 
 ## Troubleshooting
 
@@ -357,6 +390,32 @@ For issues or questions:
 - Pool operators: Contact to be added to the preconfigured list
 
 ## Changelog
+
+### Version 1.3 - December 2025
+
+**New Features:**
+- Added: TLS connection testing with `-t`/`--tls` flag
+- Added: `test_stratum_tls_connection()` function for secure stratum connections
+- Added: TLS port field to PREDEFINED_SERVERS configuration
+- Added: TLS column in results table showing secure connection times
+- Added: `lookup_predefined_server()` for automatic metadata extraction
+- Added: Auto-detection of TLS ports for predefined servers
+
+**Pool Updates:**
+- Updated: public-pool.io default port from 21496 to 3333
+- Added: pool.noderunners.network with TLS support (port 1337, TLS 1336)
+- Added: 4 new pools (Blitzpool, Sunnydecree, Nerdminer.de, Satoshi Radio)
+- Updated: Total pool count from 16 to 20
+
+**TLS-Enabled Pools:**
+- AtlasPool.io (TLS port 4333)
+- Public Pool (TLS port 4333)
+- Noderunners (TLS port 1336)
+
+**Improvements:**
+- Enhanced: PREDEFINED_SERVERS documentation with detailed field descriptions
+- Improved: Single server testing now extracts country code from predefined list
+- Improved: Better error handling for TLS port validation
 
 ### Version 1.2 - November 2025
 
