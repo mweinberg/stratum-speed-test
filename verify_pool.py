@@ -130,10 +130,10 @@ def connect_and_subscribe(host: str, port: int, timeout: int = 10) -> Tuple[Opti
         return None, None
 
 
-def authorize_worker(sock: socket.socket, username: str, password: str = "x") -> Tuple[bool, Optional[dict]]:
+def authorize_worker(sock: socket.socket, username: str, password: str = "x") -> Tuple[bool, Optional[dict], Optional[float]]:
     """
     Send mining.authorize with username (typically your BTC address).
-    Returns (authorized, mining_notify_params) - notify may be None.
+    Returns (authorized, mining_notify_params, difficulty) - notify and difficulty may be None.
     """
     try:
         # Ensure socket has a reasonable timeout
@@ -170,10 +170,11 @@ def authorize_worker(sock: socket.socket, username: str, password: str = "x") ->
         response = ''.join(response_parts).strip()
         
         if not response:
-            return False, None
+            return False, None, None
         
         authorized = False
         notify_params = None
+        difficulty = None
         
         for line in response.split('\n'):
             if line.strip():
@@ -187,19 +188,25 @@ def authorize_worker(sock: socket.socket, username: str, password: str = "x") ->
                     # Check for mining.notify
                     if data.get('method') == 'mining.notify':
                         notify_params = data.get('params')
+                    
+                    # Check for mining.set_difficulty
+                    if data.get('method') == 'mining.set_difficulty':
+                        diff = data.get('params', [None])[0]
+                        if diff is not None:
+                            difficulty = float(diff)
                 except json.JSONDecodeError:
                     continue
         
-        return authorized, notify_params
+        return authorized, notify_params, difficulty
         
     except Exception as e:
-        return False, None
+        return False, None, None
 
 
-def wait_for_mining_notify(sock: socket.socket, timeout: int = 15, retry_count: int = 0) -> Optional[dict]:
+def wait_for_mining_notify(sock: socket.socket, timeout: int = 15, retry_count: int = 0) -> Tuple[Optional[dict], Optional[float]]:
     """
     Wait for mining.notify message containing the block template.
-    Returns the notify params or None.
+    Returns (notify_params, difficulty) or (None, None).
     
     Args:
         sock: Socket connection to pool
@@ -215,14 +222,20 @@ def wait_for_mining_notify(sock: socket.socket, timeout: int = 15, retry_count: 
         # May need to receive multiple messages
         buffer = ""
         start_time = time.time()
+        difficulty = None
+        notify_params = None
         
         while True:
             try:
                 chunk = sock.recv(8192).decode('utf-8')
             except socket.timeout:
                 elapsed = time.time() - start_time
-                print(f"    Timeout after {elapsed:.1f}s - no mining.notify received")
-                return None
+                if not notify_params:
+                    print(f"    Timeout after {elapsed:.1f}s - no mining.notify received")
+                    return None, None
+                else:
+                    # We got notify but timed out waiting for more data
+                    return notify_params, difficulty
                 
             if not chunk:
                 break
@@ -241,20 +254,36 @@ def wait_for_mining_notify(sock: socket.socket, timeout: int = 15, retry_count: 
                             elapsed = time.time() - start_time
                             if retry_count > 0:
                                 print(f"    ✓ Received after {elapsed:.1f}s (retry {retry_count})")
-                            return data.get('params')
+                            notify_params = data.get('params')
+                            # Don't return immediately - keep reading for difficulty
                         
                         # Also check for mining.set_difficulty
                         if data.get('method') == 'mining.set_difficulty':
-                            print(f"    Received difficulty: {data.get('params', [None])[0]}")
+                            diff = data.get('params', [None])[0]
+                            if diff is not None:
+                                difficulty = float(diff)
+                                print(f"    Received difficulty: {difficulty:,.0f}")
+                        
+                        # If we have both, we can return
+                        if notify_params is not None:
+                            # Give it a moment to see if difficulty comes through
+                            if difficulty is not None:
+                                return notify_params, difficulty
                             
                     except json.JSONDecodeError:
                         continue
+            
+            # If we got notify_params, wait a bit more for difficulty then return
+            if notify_params is not None:
+                elapsed = time.time() - start_time
+                if elapsed > 1.0:  # Wait max 1 more second for difficulty
+                    return notify_params, difficulty
         
-        return None
+        return notify_params, difficulty
         
     except Exception as e:
         print(f"    Error receiving notify: {e}")
-        return None
+        return None, None
 
 
 def parse_coinbase_script(coinb1_hex: str) -> dict:
@@ -1231,7 +1260,7 @@ def test_all_address_types(host: str, port: int, timeout: int, password: str) ->
             continue
         
         # Try to authorize with this address
-        authorized, notify_params = authorize_worker(sock, address, password)
+        authorized, notify_params, difficulty = authorize_worker(sock, address, password)
         
         if not authorized:
             # Check if it's a connection issue or explicit rejection
@@ -1243,7 +1272,7 @@ def test_all_address_types(host: str, port: int, timeout: int, password: str) ->
         
         # Get notify if not received
         if not notify_params:
-            notify_params = wait_for_mining_notify(sock, timeout)
+            notify_params, difficulty = wait_for_mining_notify(sock, timeout)
         
         sock.close()
         
@@ -1561,7 +1590,7 @@ Note: This tool performs a basic verification. For complete security, you should
     
     # Step 2: Authorize
     print("\n[2/4] Authorizing worker...")
-    authorized, notify_params = authorize_worker(sock, username, args.password)
+    authorized, notify_params, difficulty = authorize_worker(sock, username, args.password)
     
     if not authorized:
         print("❌ Authorization failed")
@@ -1579,7 +1608,9 @@ Note: This tool performs a basic verification. For complete security, you should
         
         # Try with retries for slow pools
         for retry in range(args.retries + 1):
-            notify_params = wait_for_mining_notify(sock, args.timeout, retry_count=retry)
+            notify_params, diff = wait_for_mining_notify(sock, args.timeout, retry_count=retry)
+            if diff is not None:
+                difficulty = diff
             if notify_params:
                 break
             
@@ -1593,7 +1624,9 @@ Note: This tool performs a basic verification. For complete security, you should
                     print("❌ Reconnection failed")
                     return 1
                 
-                authorized, notify_params = authorize_worker(sock, username, args.password)
+                authorized, notify_params, diff = authorize_worker(sock, username, args.password)
+                if diff is not None:
+                    difficulty = diff
                 if notify_params:
                     print(f"    ✓ Received on reconnect (retry {retry + 1})")
                     break
@@ -1607,6 +1640,10 @@ Note: This tool performs a basic verification. For complete security, you should
         return 1
     
     print("✓ Received block template")
+    
+    # Display difficulty if captured
+    if difficulty is not None:
+        print(f"    Pool difficulty: {difficulty:,.0f}")
     
     # Parse notify params
     # Format: [job_id, prevhash, coinb1, coinb2, merkle_branch, version, nbits, ntime, clean_jobs]
