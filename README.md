@@ -50,7 +50,7 @@ Test all preconfigured pools with 1 run each:
 python3 stratum_test.py  # or just 'python' on some systems
 ```
 
-### TLS Connection Testing (New in v1.3)
+### TLS Connection Testing (New in v1.3, Enhanced in v1.4)
 
 Test secure TLS stratum connections for pools that support it:
 
@@ -60,13 +60,24 @@ python stratum_test.py -t
 
 This tests both regular and TLS connections, showing response times for each. TLS results appear in an additional column:
 - **Number** = TLS connection time in milliseconds
-- **N/A** = Pool doesn't support TLS
-- **FAILED** = TLS connection failed
+- **-** = Pool doesn't support TLS
+- **FAILED** = TLS connection failed (see detailed error message below table)
+
+**Requirements:**
+- Python 3.6+ (Python 3.7+ recommended for TLS 1.3 support)
 
 **TLS-enabled pools:**
 - AtlasPool.io (port 4333)
 - Public Pool (port 4333)
 - Noderunners (port 1336)
+
+**New in v1.4:** Skip certificate verification for testing IP addresses:
+
+```bash
+python stratum_test.py -t --no-verify-cert
+```
+
+**Warning:** Only use `--no-verify-cert` for testing purposes - it disables important security checks!
 
 ### Address Type Verification (New in v1.1)
 
@@ -390,6 +401,37 @@ For issues or questions:
 - Pool operators: Contact to be added to the preconfigured list
 
 ## Changelog
+
+### Version 1.4 - December 2025
+
+**New Features:**
+- Added: Enhanced TLS error reporting with detailed error messages
+- Added: `--no-verify-cert` flag to bypass certificate verification (useful for testing IP addresses)
+- Added: Python version checking (requires Python 3.6+ for TLS, 3.7+ recommended for TLS 1.3)
+- Added: `print_tls_errors()` function displays detailed TLS failure information after results table
+- Added: Helpful tips when certificate errors are detected
+
+**TLS Improvements:**
+- Enhanced: `test_stratum_tls_connection()` now returns tuple with error details
+- Enhanced: Categorized error messages (certificate verification, SSL errors, timeouts, DNS failures, network errors)
+- Improved: TLS column always displays when `-t` flag is used (consistent table formatting)
+- Changed: Non-TLS pools now show "-" instead of "N/A" for cleaner output
+- Fixed: Table separator formatting issue with TLS column
+
+**Error Reporting:**
+- Certificate verification failures show specific hostname mismatch details
+- Connection timeouts, DNS failures, and network errors clearly identified
+- Automatic suggestion to use `--no-verify-cert` when certificate errors detected
+
+**Documentation:**
+- Updated: Header comments with TLS version requirements and new features
+- Updated: Help text with Python version requirements and security warnings
+- Updated: Examples showing certificate verification bypass usage
+
+**Version Check:**
+- Script now validates Python version when TLS testing is enabled
+- Shows warning if Python 3.6 detected (TLS 1.2 only, TLS 1.3 requires 3.7+)
+- Exits with clear error if Python < 3.6
 
 ### Version 1.3 - December 2025
 

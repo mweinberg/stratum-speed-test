@@ -11,6 +11,9 @@ Features:
   • Concurrent testing for fast results (~10 seconds)
   • Multiple runs for accuracy (--runs 1-3)
   • TLS connection testing (-t/--tls flag) for secure stratum connections
+    - Supports TLS 1.3 (Python 3.7+) and TLS 1.2 (Python 3.6+)
+    - Detailed error reporting for TLS failures
+    - Optional certificate verification bypass (--no-verify-cert)
   • Address type verification (-v flag) tests all 5 Bitcoin address formats:
     - P2PKH (Legacy): 1...
     - P2SH (Script Hash): 3...
@@ -24,8 +27,11 @@ Usage:
     # Test all pools
     python3 stratum_test.py
     
-    # Test with TLS support
+    # Test with TLS support (requires Python 3.6+)
     python3 stratum_test.py -t
+    
+    # Test with TLS, skip certificate verification (for IP addresses)
+    python3 stratum_test.py -t --no-verify-cert
     
     # Test with verification
     python3 stratum_test.py -v
@@ -37,9 +43,13 @@ Usage:
     python3 stratum_test.py solo.atlaspool.io 3333
     
     # Test single pool with TLS
-    python3 stratum_test.py public-pool.io 3333 -t
+    python3 stratum_test.py solo.atlaspool.io 3333 -t
 
-Version: 1.3
+Requirements:
+  • Python 3.6+ (Python 3.7+ recommended for TLS 1.3 support)
+  • No external dependencies (uses only standard library)
+
+Version: 1.4
 """
 
 import socket
@@ -286,10 +296,21 @@ def test_stratum_connection(hostname: str, port: int, timeout: int = 5) -> Optio
     except:
         return None
 
-def test_stratum_tls_connection(hostname: str, port: int, timeout: int = 5) -> Optional[float]:
+def test_stratum_tls_connection(hostname: str, port: int, timeout: int = 5, verify_cert: bool = True) -> Tuple[Optional[float], Optional[str]]:
     """
     Test stratum server TLS connection and return response time in milliseconds.
-    Returns None if connection fails.
+    Returns (elapsed_time, error_message) tuple.
+    
+    Args:
+        hostname: Server hostname or IP address
+        port: TLS port number
+        timeout: Connection timeout in seconds
+        verify_cert: If False, disables certificate verification (useful for IP addresses)
+    
+    Returns:
+        Tuple of (elapsed_time_ms, error_message)
+        - elapsed_time_ms: Time in milliseconds if successful, None if failed
+        - error_message: None if successful, error description if failed
     """
     try:
         import ssl
@@ -297,14 +318,23 @@ def test_stratum_tls_connection(hostname: str, port: int, timeout: int = 5) -> O
         # Create SSL context
         context = ssl.create_default_context()
         
+        # Disable certificate verification if requested
+        if not verify_cert:
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+        
         # Create socket and wrap with TLS
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(timeout)
         
         start_time = time.time()
         
+        # For certificate verification, we need a hostname (not IP)
+        # If verify_cert is False, we can use None for server_hostname
+        server_hostname = hostname if verify_cert else None
+        
         # Connect and perform TLS handshake
-        with context.wrap_socket(sock, server_hostname=hostname) as tls_sock:
+        with context.wrap_socket(sock, server_hostname=server_hostname) as tls_sock:
             tls_sock.connect((hostname, port))
             
             subscribe_msg = json.dumps({
@@ -323,10 +353,34 @@ def test_stratum_tls_connection(hostname: str, port: int, timeout: int = 5) -> O
                 except json.JSONDecodeError:
                     pass
         
-        return elapsed_time
+        return (elapsed_time, None)
         
-    except:
-        return None
+    except Exception as e:
+        import ssl
+        error_type = type(e).__name__
+        error_msg = str(e)
+        
+        # Categorize common TLS errors
+        if isinstance(e, ssl.SSLCertVerificationError):
+            return (None, f"Certificate verification failed: {error_msg}")
+        elif isinstance(e, ssl.SSLError):
+            if "CERTIFICATE_VERIFY_FAILED" in error_msg:
+                return (None, "Certificate verification failed")
+            elif "certificate verify failed" in error_msg.lower():
+                return (None, "Certificate verification failed")
+            else:
+                return (None, f"SSL error: {error_msg}")
+        elif isinstance(e, socket.timeout):
+            return (None, "Connection timeout")
+        elif isinstance(e, ConnectionRefusedError):
+            return (None, "Connection refused")
+        elif isinstance(e, OSError):
+            if "Name or service not known" in error_msg or "nodename nor servname provided" in error_msg:
+                return (None, "DNS resolution failed")
+            else:
+                return (None, f"Network error: {error_msg}")
+        else:
+            return (None, f"{error_type}: {error_msg}")
 
 def get_public_ip() -> Optional[str]:
     """Get the public IPv4 address"""
@@ -525,11 +579,12 @@ def test_address_types(hostname: str, port: int) -> Dict[str, Optional[bool]]:
 
 def test_server_multiple_runs(hostname: str, port: int, display_name: str, 
                                runs: int, country_code: str = "??", verify: bool = False,
-                               tls_port: int = 0, test_tls: bool = False) -> Dict:
+                               tls_port: int = 0, test_tls: bool = False, verify_cert: bool = True) -> Dict:
     """Test a server multiple times and return statistics"""
     ping_times = []
     stratum_times = []
     tls_times = []
+    tls_errors = []
     
     for _ in range(runs):
         ping_time = ping_host(hostname)
@@ -542,9 +597,11 @@ def test_server_multiple_runs(hostname: str, port: int, display_name: str,
         
         # Test TLS if requested and port is available
         if test_tls and tls_port > 0:
-            tls_time = test_stratum_tls_connection(hostname, tls_port)
+            tls_time, tls_error = test_stratum_tls_connection(hostname, tls_port, verify_cert=verify_cert)
             if tls_time is not None:
                 tls_times.append(tls_time)
+            if tls_error is not None:
+                tls_errors.append(tls_error)
         
         # Small delay between runs
         if runs > 1:
@@ -558,7 +615,8 @@ def test_server_multiple_runs(hostname: str, port: int, display_name: str,
         'country_code': country_code,
         'ping_times': ping_times,
         'stratum_times': stratum_times,
-        'tls_times': tls_times
+        'tls_times': tls_times,
+        'tls_errors': tls_errors
     }
     
     # Optionally test address type compatibility
@@ -609,7 +667,7 @@ def format_time_for_tls(result: Dict) -> str:
     
     # If no TLS port configured
     if tls_port == 0:
-        return "N/A"
+        return "-"
     
     # If TLS port exists but no successful times
     if not tls_times:
@@ -628,8 +686,8 @@ def print_table(results: List[Dict], runs: int, verify: bool = False, show_tls: 
     # Check if verification was performed
     has_verification = verify and any('address_types' in r for r in results)
     
-    # Check if TLS testing was performed
-    has_tls = show_tls and any(r.get('tls_times') for r in results)
+    # Check if TLS testing was performed (show column if TLS testing is enabled, regardless of results)
+    has_tls = show_tls
     
     # Calculate column widths
     max_name_len = max(len(r['display_name']) for r in results)
@@ -657,8 +715,11 @@ def print_table(results: List[Dict], runs: int, verify: bool = False, show_tls: 
     tls_values = []
     if has_tls:
         tls_values = [format_time_for_tls(r) for r in results]
-        tls_width = max(len(v) for v in tls_values)
-        tls_width = max(tls_width, len("TLS (ms)"))
+        if tls_values:  # Only calculate width if we have values
+            tls_width = max(len(v) for v in tls_values)
+            tls_width = max(tls_width, len("TLS (ms)"))
+        else:
+            tls_width = len("TLS (ms)")
     
     # Address type column widths (if verification enabled)
     addr_widths = {}
@@ -668,12 +729,13 @@ def print_table(results: List[Dict], runs: int, verify: bool = False, show_tls: 
             addr_widths[addr_type] = max(len(addr_type), 3)  # At least 3 for checkmark/X
     
     # Build separator
-    separator = f"+{'-' * (max_name_len + 2)}+{'-' * (country_width + 2)}+{'-' * (max_host_len + 2)}+{'-' * (port_width + 2)}+{'-' * (ping_width + 2)}+{'-' * (stratum_width + 2)}+"
+    separator = f"+{'-' * (max_name_len + 2)}+{'-' * (country_width + 2)}+{'-' * (max_host_len + 2)}+{'-' * (port_width + 2)}+{'-' * (ping_width + 2)}+{'-' * (stratum_width + 2)}"
     if has_tls:
-        separator += f"+{'-' * (tls_width + 2)}+"
+        separator += f"+{'-' * (tls_width + 2)}"
     if has_verification:
         for addr_type in addr_types:
-            separator += f"+{'-' * (addr_widths[addr_type] + 2)}+"
+            separator += f"+{'-' * (addr_widths[addr_type] + 2)}"
+    separator += "+"
     
     print(separator)
     
@@ -733,6 +795,42 @@ def print_table(results: List[Dict], runs: int, verify: bool = False, show_tls: 
         print("  P2PKH = Legacy (1...), P2SH = Script Hash (3...)")
         print("  P2WPKH = SegWit (bc1q...), P2WSH = SegWit Script (bc1q... long)")
         print("  P2TR = Taproot (bc1p...)")
+
+def print_tls_errors(results: List[Dict]):
+    """Print TLS error details for failed connections"""
+    # Collect all TLS failures with errors
+    tls_failures = []
+    for r in results:
+        tls_port = r.get('tls_port', 0)
+        tls_errors = r.get('tls_errors', [])
+        
+        # Only report if TLS was attempted (port > 0) and there are errors
+        if tls_port > 0 and tls_errors:
+            # Get the most common error (in case of multiple runs)
+            error_msg = tls_errors[0] if tls_errors else "Unknown error"
+            tls_failures.append({
+                'display_name': r['display_name'],
+                'hostname': r['hostname'],
+                'tls_port': tls_port,
+                'error': error_msg
+            })
+    
+    if not tls_failures:
+        return
+    
+    print("\nTLS Connection Failures:")
+    print("-" * 80)
+    
+    for failure in tls_failures:
+        print(f"  • {failure['display_name']} ({failure['hostname']}:{failure['tls_port']})")
+        print(f"    Error: {failure['error']}")
+    
+    # Add helpful hint about certificate verification
+    cert_errors = [f for f in tls_failures if 'certificate' in f['error'].lower() or 'verification' in f['error'].lower()]
+    if cert_errors:
+        print()
+        print("  💡 Tip: If testing IP addresses, use --no-verify-cert to skip certificate validation")
+        print("     Example: python3 stratum_test.py -t --no-verify-cert")
 
 def print_summary(results: List[Dict]):
     """Print summary of fastest servers"""
@@ -827,7 +925,7 @@ def print_network_info(ipv4: Optional[str], asn_info: Optional[Dict]):
         elif asn_info.get('asn'):
             print(f"Network: {asn_info['asn']}")
 
-def test_all_servers(runs: int = 1, verify: bool = False, test_tls: bool = False):
+def test_all_servers(runs: int = 1, verify: bool = False, test_tls: bool = False, verify_cert: bool = True):
     """Test all predefined servers with concurrent execution"""
     # Print intro
     print_intro()
@@ -857,7 +955,7 @@ def test_all_servers(runs: int = 1, verify: bool = False, test_tls: bool = False
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(test_server_multiple_runs, host, port, name, runs, cc, verify, tls_port, test_tls): (host, port, tls_port, name, cc)
+            executor.submit(test_server_multiple_runs, host, port, name, runs, cc, verify, tls_port, test_tls, verify_cert): (host, port, tls_port, name, cc)
             for host, port, tls_port, name, cc in PREDEFINED_SERVERS
         }
         
@@ -880,10 +978,11 @@ def test_all_servers(runs: int = 1, verify: bool = False, test_tls: bool = False
     print("\nResults:")
     print_table(results, runs, verify, test_tls)
     print_summary(results)
+    print_tls_errors(results)
     
     print()
 
-def test_single_server(hostname: str, port: int, runs: int = 1, test_tls: bool = False, tls_port: int = 0):
+def test_single_server(hostname: str, port: int, runs: int = 1, test_tls: bool = False, tls_port: int = 0, verify_cert: bool = True):
     """Test a single server"""
     # Print intro
     print_intro()
@@ -911,14 +1010,16 @@ def test_single_server(hostname: str, port: int, runs: int = 1, test_tls: bool =
     
     # Test server
     tls_msg = f" with TLS on port {tls_port}" if test_tls and tls_port > 0 else ""
-    print(f"\nTesting {hostname}:{port} (runs: {runs}){tls_msg}...")
-    result = test_server_multiple_runs(hostname, port, display_name, runs, country_code, False, tls_port, test_tls)
+    cert_msg = " (no cert verification)" if test_tls and not verify_cert else ""
+    print(f"\nTesting {hostname}:{port} (runs: {runs}){tls_msg}{cert_msg}...")
+    result = test_server_multiple_runs(hostname, port, display_name, runs, country_code, False, tls_port, test_tls, verify_cert)
     print("\nResults:")
     print_table([result], runs, False, test_tls)
+    print_tls_errors([result])
     
     print()
 
-def output_json(runs: int = 1, test_tls: bool = False):
+def output_json(runs: int = 1, test_tls: bool = False, verify_cert: bool = True):
     """Output results in JSON format"""
     # Get network info
     ipv4 = get_public_ip()
@@ -940,7 +1041,7 @@ def output_json(runs: int = 1, test_tls: bool = False):
     # Test servers
     with ThreadPoolExecutor(max_workers=len(PREDEFINED_SERVERS)) as executor:
         futures = [
-            executor.submit(test_server_multiple_runs, host, port, name, runs, cc, False, tls_port, test_tls)
+            executor.submit(test_server_multiple_runs, host, port, name, runs, cc, False, tls_port, test_tls, verify_cert)
             for host, port, tls_port, name, cc in PREDEFINED_SERVERS
         ]
         for future in as_completed(futures):
@@ -975,9 +1076,12 @@ Examples:
   Test with 3 runs for accuracy:
     python stratum_test.py --runs 3
   
-  Test with TLS support:
+  Test with TLS support (requires Python 3.6+):
     python stratum_test.py -t
     python stratum_test.py --tls
+  
+  Test with TLS, skip certificate verification (for IP addresses):
+    python stratum_test.py -t --no-verify-cert
   
   Output JSON format:
     python stratum_test.py --json
@@ -987,6 +1091,9 @@ Examples:
   
   Test single server with TLS:
     python stratum_test.py solo.atlaspool.io 3333 -t 4333
+  
+  Test single server with TLS, no cert verification:
+    python stratum_test.py 3.76.213.107 3333 -t 4333 --no-verify-cert
   
   Test single server with 2 runs:
     python stratum_test.py solo.atlaspool.io 3333 --runs 2
@@ -1004,8 +1111,12 @@ Examples:
                              'which formats each pool accepts. This confirms the pool will pay block rewards '
                              'to your address type. See verify_pool.py for detailed verification. (adds ~10s per server)')
     parser.add_argument('-t', '--tls', nargs='?', type=int, const=0, metavar='TLS_PORT',
-                        help='Test TLS stratum connections. For predefined servers, uses configured TLS ports. '
+                        help='Test TLS stratum connections. Requires Python 3.6+ (Python 3.7+ for TLS 1.3). '
+                             'For predefined servers, uses configured TLS ports. '
                              'For single server test, specify TLS port number (e.g., -t 4333)')
+    parser.add_argument('--no-verify-cert', action='store_true',
+                        help='Disable TLS certificate verification (useful for testing IP addresses with TLS). '
+                             'WARNING: Only use for testing - disables security checks!')
     parser.add_argument('--json', action='store_true',
                         help='Output results in JSON format')
     
@@ -1019,6 +1130,18 @@ Examples:
     # Determine if TLS testing is enabled
     test_tls = args.tls is not None
     tls_port = args.tls if args.tls else 0
+    verify_cert = not args.no_verify_cert
+    
+    # Check Python version for TLS support
+    if test_tls:
+        python_version = sys.version_info
+        if python_version < (3, 6):
+            print("Error: TLS testing requires Python 3.6 or higher", file=sys.stderr)
+            print(f"Current version: Python {python_version.major}.{python_version.minor}.{python_version.micro}", file=sys.stderr)
+            sys.exit(1)
+        elif python_version < (3, 7):
+            print("Warning: Python 3.6 detected - TLS 1.2 will be used (TLS 1.3 requires Python 3.7+)", file=sys.stderr)
+            print()
     
     # Single server test
     if args.hostname and args.port:
@@ -1030,17 +1153,17 @@ Examples:
                 # Not in predefined list or no TLS support configured
                 print("Error: TLS port must be specified for single server TLS test (e.g., -t 4333)", file=sys.stderr)
                 sys.exit(1)
-        test_single_server(args.hostname, args.port, args.runs, test_tls, tls_port)
+        test_single_server(args.hostname, args.port, args.runs, test_tls, tls_port, verify_cert)
     elif args.hostname or args.port:
         print("Error: Both hostname and port must be provided for single server test", file=sys.stderr)
         parser.print_help()
         sys.exit(1)
     # JSON output
     elif args.json:
-        output_json(args.runs, test_tls)
+        output_json(args.runs, test_tls, verify_cert)
     # Default: test all servers
     else:
-        test_all_servers(args.runs, args.verify, test_tls)
+        test_all_servers(args.runs, args.verify, test_tls, verify_cert)
 
 if __name__ == "__main__":
     main()
