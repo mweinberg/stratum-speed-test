@@ -62,6 +62,7 @@ import platform
 import urllib.request
 import urllib.error
 import binascii
+import threading
 from typing import Optional, Tuple, Dict, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from statistics import mean, median
@@ -103,6 +104,9 @@ PREDEFINED_SERVERS = [
 
 # Global flag to track if ping is available
 _ping_available = None
+
+# Global lock to synchronize ping operations
+_ping_lock = threading.Lock()
 
 def lookup_predefined_server(hostname: str) -> Optional[Tuple[int, int, str, str]]:
     """
@@ -182,83 +186,88 @@ def ping_host(hostname: str, timeout: int = 2) -> Optional[float]:
     """
     Perform ICMP ping to hostname and return response time in milliseconds.
     Returns None if ping fails or is not supported.
-    
+
     Note: Uses TCP connection test as fallback for systems where ICMP ping
     has subprocess issues (e.g., Python 3.9 on macOS).
     """
     # Check if ping is available (cached after first check)
     if not check_ping_available():
         return None
-    
-    try:
-        system = platform.system().lower()
-        
-        if system == 'windows':
-            command = ['ping', '-n', '1', '-w', str(timeout * 1000), hostname]
-        else:
-            # Unix-like systems (macOS, Linux)
-            command = ['ping', '-c', '1', hostname]
-        
-        # Try using os.system as a workaround for Python 3.9 subprocess issues
-        import tempfile
-        import os
-        import random
-        
-        # Add small random delay to avoid concurrent temp file collisions
-        time.sleep(random.uniform(0, 0.1))
-        
-        with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.txt') as f:
-            temp_file = f.name
-        
-        try:
-            # Redirect output to temp file with timeout
-            if system == 'windows':
-                cmd = f'ping -n 1 -w {timeout * 1000} {hostname} > "{temp_file}" 2>&1'
-            else:
-                # Unix-like systems - don't use -W flag due to inconsistencies
-                # Let the subprocess timeout handle it
-                cmd = f'ping -c 1 {hostname} > "{temp_file}" 2>&1'
-            
-            ret = os.system(cmd)
-            
-            # Check if file exists and has content
-            if not os.path.exists(temp_file):
-                return None
-            
-            # Non-zero return code usually means ping failed
-            if ret != 0:
-                return None
-            
-            with open(temp_file, 'r') as f:
-                output = f.read()
-            
-            if not output or len(output) < 10:
-                return None
-            
-            if system == 'windows':
-                import re
-                matches = re.findall(r'(\d+(?:\.\d+)?)\s*ms', output.lower())
-                if matches:
-                    time_str = matches[-1]
-                else:
-                    return None
-            else:
-                if 'time=' in output:
-                    time_part = output.split('time=')[1]
-                    time_str = time_part.split('ms')[0].strip().split()[0]
-                else:
-                    return None
-                    
-            return float(time_str)
-        finally:
+
+    # Use global lock to prevent concurrent ping operations
+    with _ping_lock:
+        # Retry ping up to 3 times for reliability
+        for attempt in range(3):
             try:
-                if os.path.exists(temp_file):
-                    os.unlink(temp_file)
-            except:
-                pass
-                
-    except:
-        # Silently fail for ping - it's not critical
+                system = platform.system().lower()
+
+                if system == 'windows':
+                    command = ['ping', '-n', '1', '-w', str(timeout * 1000), hostname]
+                else:
+                    # Unix-like systems (macOS, Linux)
+                    command = ['ping', '-c', '1', '-W', str(timeout), hostname]
+
+                # Use subprocess.run with proper capture to avoid temp file issues
+                result = subprocess.run(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=timeout + 1,  # Add 1 second buffer
+                    text=True
+                )
+
+                # Check return code - non-zero usually means ping failed
+                if result.returncode != 0:
+                    # If this is not the last attempt, continue to retry
+                    if attempt < 2:
+                        time.sleep(0.1)  # Small delay before retry
+                        continue
+                    return None
+
+                output = result.stdout
+                if not output or len(output) < 10:
+                    # If this is not the last attempt, continue to retry
+                    if attempt < 2:
+                        time.sleep(0.1)  # Small delay before retry
+                        continue
+                    return None
+
+                if system == 'windows':
+                    import re
+                    matches = re.findall(r'(\d+(?:\.\d+)?)\s*ms', output.lower())
+                    if matches:
+                        time_str = matches[-1]
+                    else:
+                        # If this is not the last attempt, continue to retry
+                        if attempt < 2:
+                            time.sleep(0.1)  # Small delay before retry
+                            continue
+                        return None
+                else:
+                    if 'time=' in output:
+                        time_part = output.split('time=')[1]
+                        time_str = time_part.split('ms')[0].strip().split()[0]
+                    else:
+                        # If this is not the last attempt, continue to retry
+                        if attempt < 2:
+                            time.sleep(0.1)  # Small delay before retry
+                            continue
+                        return None
+
+                return float(time_str)
+
+            except subprocess.TimeoutExpired:
+                # Ping timed out - if not last attempt, retry
+                if attempt < 2:
+                    continue
+                return None
+            except (OSError, ValueError):
+                # System call failed or parsing error - if not last attempt, retry
+                if attempt < 2:
+                    continue
+                return None
+
+        # All attempts failed
         return None
 
 def test_stratum_connection(hostname: str, port: int, timeout: int = 5) -> Optional[float]:
