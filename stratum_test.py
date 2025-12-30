@@ -101,6 +101,7 @@ PREDEFINED_SERVERS = [
     ("public-pool.io", 3333, 4333, "Public Pool", "US"),           # United States
     ("solo.cat", 3333, 0, "solo.cat", "US"),                        # United States
     ("solo-ca.solohash.co.uk", 3333, 0, "US SoloHash", "US"),                        # United States
+    ("m45core.com", 3333, 4333, "M45-Core SoloPool", "US"),                        # United States
 ]
 
 # Global flag to track if ping is available
