@@ -13,6 +13,7 @@ Features:
   • Shows payout percentages for each output (miner vs pool fee)
   • Decodes OP_RETURN witness commitments
   • Tests all 5 Bitcoin address types for compatibility
+  • Validates extranonce1 (existence, size, uniqueness)
   • Analyzes pool architecture (detects proxying indicators)
   • Automatic retry logic for slow-responding pools
   • Connection timing metrics
@@ -1067,6 +1068,209 @@ def generate_random_p2wpkh_address() -> str:
     return address
 
 
+def validate_extranonce1(subscribe_response: dict) -> Dict:
+    """
+    Validate and analyze extranonce1 from mining.subscribe response.
+    
+    Returns dict with:
+        - exists: Boolean indicating if extranonce1 is present
+        - value: Hex string of extranonce1 (or None)
+        - size_bytes: Size in bytes (or None)
+        - size_bits: Size in bits (or None)
+        - as_integer: Integer representation (or None)
+        - worker_capacity: Theoretical number of unique workers (or None)
+        - warnings: List of warning messages
+        - status: 'good', 'warning', or 'critical'
+    """
+    result = {
+        'exists': False,
+        'value': None,
+        'size_bytes': None,
+        'size_bits': None,
+        'as_integer': None,
+        'worker_capacity': None,
+        'warnings': [],
+        'status': 'critical'
+    }
+    
+    # Check if extranonce1 exists in response
+    if 'result' not in subscribe_response or not isinstance(subscribe_response['result'], list):
+        result['warnings'].append("Invalid subscribe response format")
+        return result
+    
+    if len(subscribe_response['result']) < 2:
+        result['warnings'].append("Subscribe response missing extranonce1 (result array too short)")
+        return result
+    
+    extranonce1 = subscribe_response['result'][1]
+    
+    if extranonce1 is None or extranonce1 == '':
+        result['warnings'].append("Extranonce1 is empty or null")
+        return result
+    
+    # Extranonce1 exists
+    result['exists'] = True
+    result['value'] = extranonce1
+    result['size_bytes'] = len(extranonce1) // 2  # Hex string to bytes
+    result['size_bits'] = result['size_bytes'] * 8
+    
+    # Convert to integer for analysis
+    try:
+        result['as_integer'] = int(extranonce1, 16)
+    except ValueError:
+        result['warnings'].append(f"Invalid hex format: {extranonce1}")
+        return result
+    
+    # Calculate worker capacity (2^bits possible values)
+    result['worker_capacity'] = 2 ** result['size_bits']
+    
+    # Analyze and set warnings/status
+    if result['size_bytes'] < 4:
+        result['status'] = 'warning'
+        result['warnings'].append(f"Small extranonce1 ({result['size_bytes']} bytes) - limited to {result['worker_capacity']:,} unique workers")
+        result['warnings'].append("This may indicate a proxy layer or limited infrastructure")
+    elif result['size_bytes'] >= 8:
+        result['status'] = 'good'
+        # No warnings for good size
+    else:  # 4-7 bytes
+        result['status'] = 'good'
+        # Acceptable size, no warnings
+    
+    return result
+
+
+def test_extranonce1_uniqueness(host: str, port: int, timeout: int = 10, num_tests: int = 5) -> Dict:
+    """
+    Test if pool provides unique extranonce1 values for multiple connections.
+    
+    Returns dict with:
+        - extranonce1_values: List of extranonce1 values received
+        - unique_count: Number of unique values
+        - total_count: Total number of successful connections
+        - all_unique: Boolean indicating if all values were unique
+        - duplicates: List of duplicate values (if any)
+        - pattern: 'sequential', 'random', or 'unknown'
+        - warnings: List of warning messages
+        - status: 'good', 'warning', or 'critical'
+    """
+    print("\n" + "=" * 70)
+    print("EXTRANONCE1 UNIQUENESS TEST")
+    print("=" * 70)
+    print(f"\nTesting {host}:{port} with {num_tests} connections...")
+    print("This verifies that each connection receives a unique extranonce1 value.")
+    print()
+    
+    extranonce1_values = []
+    
+    for i in range(num_tests):
+        print(f"Connection {i+1}/{num_tests}...", end=" ")
+        
+        sock, subscribe_response = connect_and_subscribe(host, port, timeout)
+        
+        if not sock or not subscribe_response:
+            print("❌ Failed")
+            continue
+        
+        # Extract extranonce1
+        validation = validate_extranonce1(subscribe_response)
+        
+        if validation['exists']:
+            extranonce1_values.append(validation['value'])
+            print(f"✓ {validation['value']} ({validation['size_bytes']} bytes)")
+        else:
+            print("❌ No extranonce1")
+        
+        sock.close()
+        
+        # Small delay between connections
+        if i < num_tests - 1:
+            time.sleep(0.3)
+    
+    # Analyze results
+    result = {
+        'extranonce1_values': extranonce1_values,
+        'unique_count': len(set(extranonce1_values)),
+        'total_count': len(extranonce1_values),
+        'all_unique': False,
+        'duplicates': [],
+        'pattern': 'unknown',
+        'warnings': [],
+        'status': 'good'
+    }
+    
+    if result['total_count'] == 0:
+        result['status'] = 'critical'
+        result['warnings'].append("Failed to receive any extranonce1 values")
+        print("\n❌ CRITICAL: Could not retrieve extranonce1 from any connection")
+        print("=" * 70)
+        return result
+    
+    # Check for uniqueness
+    result['all_unique'] = (result['unique_count'] == result['total_count'])
+    
+    if not result['all_unique']:
+        # Find duplicates
+        from collections import Counter
+        counts = Counter(extranonce1_values)
+        result['duplicates'] = [val for val, count in counts.items() if count > 1]
+        result['status'] = 'critical'
+        result['warnings'].append(f"Found {len(result['duplicates'])} duplicate extranonce1 value(s)")
+        result['warnings'].append("CRITICAL: Duplicate extranonce1 can cause work collisions!")
+    
+    # Detect pattern (sequential vs random)
+    if result['all_unique'] and len(extranonce1_values) >= 3:
+        try:
+            int_values = [int(val, 16) for val in extranonce1_values]
+            differences = [int_values[i+1] - int_values[i] for i in range(len(int_values)-1)]
+            
+            # Check if differences are consistent (sequential)
+            if len(set(differences)) == 1 and differences[0] > 0:
+                result['pattern'] = 'sequential'
+            elif all(d > 0 for d in differences) and max(differences) - min(differences) <= 10:
+                result['pattern'] = 'sequential'
+            else:
+                result['pattern'] = 'random'
+        except:
+            result['pattern'] = 'unknown'
+    
+    # Print results
+    print()
+    print("Results:")
+    print("-" * 70)
+    print(f"Total connections:      {result['total_count']}")
+    print(f"Unique extranonce1:     {result['unique_count']}")
+    print(f"All unique:             {'✓ Yes' if result['all_unique'] else '❌ No'}")
+    
+    if result['duplicates']:
+        print(f"Duplicate values:       {', '.join(result['duplicates'])}")
+    
+    if result['pattern'] != 'unknown':
+        print(f"Pattern:                {result['pattern'].capitalize()}")
+    
+    print()
+    
+    if result['all_unique']:
+        print("✓ PASSED: All extranonce1 values are unique")
+        print("  Each connection receives a different extranonce1, which is correct.")
+        if result['pattern'] == 'sequential':
+            print("  Values are sequential, indicating a counter-based allocation.")
+        elif result['pattern'] == 'random':
+            print("  Values appear random, indicating random or hash-based allocation.")
+    else:
+        print("❌ FAILED: Duplicate extranonce1 values detected!")
+        print()
+        print("  CRITICAL ISSUE: Multiple connections received the same extranonce1.")
+        print("  This can cause work collisions where different miners work on identical")
+        print("  block candidates, wasting hashrate and potentially causing issues if a")
+        print("  block is found.")
+        print()
+        print("  ⚠️  DO NOT MINE ON THIS POOL - Work collision risk!")
+    
+    print("=" * 70)
+    
+    return result
+
+
 def analyze_pool_architecture(host: str, port: int, timeout: int = 15, num_tests: int = 3) -> Dict:
     """
     Analyze pool architecture to detect potential proxying or performance issues.
@@ -1427,6 +1631,10 @@ Examples:
     python3 verify_pool.py solo.atlaspool.io 3333 -a
     python3 verify_pool.py solo.ckpool.org 3333 --all-types
   
+  Test extranonce1 uniqueness (detect work collisions):
+    python3 verify_pool.py solo.atlaspool.io 3333 --test-extranonce
+    python3 verify_pool.py solo.ckpool.org 3333 --test-extranonce
+  
   Analyze pool architecture (detect proxying):
     python3 verify_pool.py solo-ca.solohash.co.uk 3333 --analyze
     python3 verify_pool.py solo.atlaspool.io 3333 --analyze
@@ -1454,6 +1662,8 @@ Note: This tool performs a basic verification. For complete security, you should
                         help='Test all 5 address types to see which are supported by the pool')
     parser.add_argument('--analyze', action='store_true',
                         help='Analyze pool architecture (detect proxying, measure performance)')
+    parser.add_argument('--test-extranonce', action='store_true',
+                        help='Test extranonce1 uniqueness across multiple connections')
     parser.add_argument('--username', help='Username (defaults to your address)')
     parser.add_argument('--password', default='x', help='Password (default: x)')
     parser.add_argument('--timeout', type=int, default=30, help='Timeout in seconds (default: 30)')
@@ -1492,6 +1702,15 @@ Note: This tool performs a basic verification. For complete security, you should
     if args.analyze and args.all_types:
         print("Error: Cannot use both --analyze and --all-types", file=sys.stderr)
         sys.exit(1)
+    
+    if args.test_extranonce and args.all_types:
+        print("Error: Cannot use both --test-extranonce and --all-types", file=sys.stderr)
+        sys.exit(1)
+    
+    # Handle --test-extranonce mode
+    if args.test_extranonce:
+        result = test_extranonce1_uniqueness(args.host, args.port, args.timeout, num_tests=5)
+        return 0 if result['status'] != 'critical' else 1
     
     # Handle --analyze mode
     if args.analyze:
@@ -1588,8 +1807,38 @@ Note: This tool performs a basic verification. For complete security, you should
     print("✓ Connected successfully")
     print(f"    Subscription ID: {subscribe_response.get('id')}")
     
+    # Validate and display extranonce1
+    print("\n[1.5/5] Validating extranonce1...")
+    extranonce1_info = validate_extranonce1(subscribe_response)
+    
+    if not extranonce1_info['exists']:
+        print("❌ Extranonce1 missing or invalid")
+        for warning in extranonce1_info['warnings']:
+            print(f"    ⚠️  {warning}")
+        sock.close()
+        return 1
+    
+    print("✓ Extranonce1 received")
+    print(f"    Value (hex):     {extranonce1_info['value']}")
+    print(f"    Value (int):     {extranonce1_info['as_integer']:,}")
+    print(f"    Size:            {extranonce1_info['size_bytes']} bytes ({extranonce1_info['size_bits']} bits)")
+    print(f"    Worker capacity: {extranonce1_info['worker_capacity']:,} unique workers")
+    
+    # Display warnings if any
+    if extranonce1_info['warnings']:
+        for warning in extranonce1_info['warnings']:
+            print(f"    ⚠️  {warning}")
+    
+    # Status indicator
+    if extranonce1_info['status'] == 'good':
+        print(f"    Status:          ✓ Good")
+    elif extranonce1_info['status'] == 'warning':
+        print(f"    Status:          ⚠️  Warning")
+    else:
+        print(f"    Status:          ❌ Critical")
+    
     # Step 2: Authorize
-    print("\n[2/4] Authorizing worker...")
+    print("\n[2/5] Authorizing worker...")
     authorized, notify_params, difficulty = authorize_worker(sock, username, args.password)
     
     if not authorized:
@@ -1601,9 +1850,9 @@ Note: This tool performs a basic verification. For complete security, you should
     
     # Step 3: Wait for mining.notify (if not already received)
     if notify_params:
-        print("\n[3/4] Block template received with authorization ✓")
+        print("\n[3/5] Block template received with authorization ✓")
     else:
-        print("\n[3/4] Waiting for block template (mining.notify)...")
+        print("\n[3/5] Waiting for block template (mining.notify)...")
         print(f"    (timeout: {args.timeout} seconds, retries: {args.retries})")
         
         # Try with retries for slow pools
