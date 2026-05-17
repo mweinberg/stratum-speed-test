@@ -1793,7 +1793,8 @@ Note: This tool performs a basic verification. For complete security, you should
     print()
     print(f"Pool:    {args.host}:{args.port}")
     print(f"Address: {args.address}")
-    print(f"Username: {username}")
+    if username != args.address:
+        print(f"Username: {username}")
     print()
     
     # Step 1: Connect and subscribe
@@ -2005,16 +2006,33 @@ Note: This tool performs a basic verification. For complete security, you should
     # Show summary if multiple paying outputs
     paying_outputs = [o for o in outputs if o['value_satoshis'] > 0]
     if len(paying_outputs) > 1:
+        # Determine which output is the user's
+        user_hash = None
+        if args.address.lower().startswith('bc1p'):
+            user_hash = bech32_decode_simple(args.address)
+        elif args.address.lower().startswith('bc1'):
+            user_hash = bech32_decode_simple(args.address)
+        elif args.address.startswith('1') or args.address.startswith('3'):
+            user_hash = base58_decode(args.address)
+
         print("    " + "=" * 66)
         print("    PAYOUT BREAKDOWN:")
+        pool_fee_pct = None
         for i, output in enumerate(outputs, 1):
             if output['value_satoshis'] > 0:
                 percentage = (output['value_satoshis'] / total_value) * 100
                 addr = hash_to_address(output['address_data'], output['address_type'])
-                if addr and len(addr) > 40:
-                    addr = addr[:20] + "..." + addr[-17:]
-                print(f"      Output #{i}: {percentage:5.2f}% → {addr or output['address_type']}")
+                # Determine label
+                label = ""
+                if user_hash and output['address_data'].lower() == user_hash.lower():
+                    label = " (you)"
+                elif len(paying_outputs) == 2:
+                    label = " (pool fee)"
+                    pool_fee_pct = percentage
+                print(f"      Output #{i}: {percentage:5.2f}% → {addr or output['address_type']}{label}")
         print("    " + "=" * 66)
+        if pool_fee_pct is not None:
+            print(f"    Pool fee: {pool_fee_pct:.2f}%")
         print()
     
     # Verify if user's address is in the outputs
