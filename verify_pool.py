@@ -385,10 +385,12 @@ def parse_coinbase_script_suffix(coinb2_hex: str) -> dict:
     try:
         coinb2_bytes = binascii.unhexlify(coinb2_hex)
         
-        # Find the sequence marker (0xffffffff or 0x00000000) which marks end of script
+        # Find the sequence marker (0xffffffff, 0xfffffffe, or 0x00000000) which marks end of script
         sequence_pos = -1
         for i in range(len(coinb2_bytes) - 3):
-            if coinb2_bytes[i:i+4] == b'\xff\xff\xff\xff' or coinb2_bytes[i:i+4] == b'\x00\x00\x00\x00':
+            if (coinb2_bytes[i:i+4] == b'\xff\xff\xff\xff' or
+                coinb2_bytes[i:i+4] == b'\xff\xff\xff\xfe' or
+                coinb2_bytes[i:i+4] == b'\x00\x00\x00\x00'):
                 sequence_pos = i
                 break
         
@@ -447,7 +449,9 @@ def parse_coinbase_outputs(coinb2_hex: str, coinb1_hex: str = None) -> list:
             # Search for sequence marker in coinb2
             sequence_pos = -1
             for i in range(min(50, len(coinb2_bytes) - 4)):  # Check first 50 bytes
-                if coinb2_bytes[i:i+4] == b'\x00\x00\x00\x00' or coinb2_bytes[i:i+4] == b'\xff\xff\xff\xff':
+                if (coinb2_bytes[i:i+4] == b'\x00\x00\x00\x00' or
+                    coinb2_bytes[i:i+4] == b'\xff\xff\xff\xff' or
+                    coinb2_bytes[i:i+4] == b'\xff\xff\xff\xfe'):
                     # Check if next byte looks like output count (1-20)
                     if i + 4 < len(coinb2_bytes):
                         potential_output_count = coinb2_bytes[i+4]
@@ -604,12 +608,13 @@ def parse_coinbase_outputs(coinb2_hex: str, coinb1_hex: str = None) -> list:
             except:
                 pass
         
-        # Method 2: Search for standard sequence marker (0xffffffff)
+        # Method 2: Search for standard sequence marker (0xffffffff or 0xfffffffe)
         pos = 0
         found_sequence = False
         
         for i in range(len(coinb2_bytes) - 4):
-            if coinb2_bytes[i:i+4] == b'\xff\xff\xff\xff':
+            if (coinb2_bytes[i:i+4] == b'\xff\xff\xff\xff' or
+                coinb2_bytes[i:i+4] == b'\xff\xff\xff\xfe'):
                 pos = i + 4  # Start after sequence
                 found_sequence = True
                 break
