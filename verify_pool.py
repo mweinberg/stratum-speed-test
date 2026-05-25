@@ -79,9 +79,14 @@ def connect_and_subscribe(host: str, port: int, timeout: int = 10) -> Tuple[Opti
     Returns (socket, response) or (None, None) on failure.
     """
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Use getaddrinfo to support both IPv4 and IPv6
+        addrinfo = socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        if not addrinfo:
+            return None, None
+        af, socktype, proto, canonname, sockaddr = addrinfo[0]
+        sock = socket.socket(af, socktype, proto)
         sock.settimeout(timeout)
-        sock.connect((host, port))
+        sock.connect(sockaddr)
         
         # Send mining.subscribe
         subscribe_msg = json.dumps({
