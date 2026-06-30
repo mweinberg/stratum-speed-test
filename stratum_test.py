@@ -77,9 +77,10 @@ from statistics import mean, median
 #   5. location (str): Country code (ISO 3166-1 alpha-2) or "*MANY*" for Anycast
 #
 # Location codes: AU=Australia, CH=Switzerland, DE=Germany, FR=France, NL=Netherlands,
-#                 RU=Russia, UK=United Kingdom, US=United States, *MANY*=Anycast (multiple locations)
+#                 RU=Russia, SG=Singapore, UK=United Kingdom, US=United States, *MANY*=Anycast (multiple locations)
 PREDEFINED_SERVERS = [
     ("solo.atlaspool.io", 3333, 4333, "AtlasPool.io", "*MANY*"),  # Anycast - Global edge network
+    ("stratum.sololuck.io", 3333, 3334, "SoloLuck", "SG"),  # Singapore/Jakarta - true-solo, lowest latency for SE Asia
     ("ausolo.ckpool.org", 3333, 0, "AU CKPool", "AU"),      # Australia
     ("stratum.kano.is", 3333, 0, "KanoPool", "US"),          # United States
     ("eusolo.ckpool.org", 3333, 0, "EU CKPool", "DE"),      # Germany
