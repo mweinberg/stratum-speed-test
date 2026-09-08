@@ -77,10 +77,12 @@ from statistics import mean, median
 #   5. location (str): Country code (ISO 3166-1 alpha-2) or "*MANY*" for Anycast
 #
 # Location codes: AU=Australia, CH=Switzerland, DE=Germany, FR=France, NL=Netherlands,
-#                 ID=Indonesia, RU=Russia, UK=United Kingdom, US=United States, *MANY*=Anycast (multiple locations)
+#                 ID=Indonesia, RU=Russia, SG=Singapore, UK=United Kingdom, US=United States, *MANY*=Anycast (multiple locations)
 PREDEFINED_SERVERS = [
     ("solo.atlaspool.io", 3333, 4333, "AtlasPool.io", "*MANY*"),  # Anycast - Global edge network
-    ("stratum.sololuck.io", 3333, 3334, "SoloLuck", "ID"),  # Jakarta, Indonesia - true-solo, lowest latency for SE Asia
+    ("stratum.sololuck.io", 3333, 3334, "ID SoloLuck", "ID"),  # Jakarta - true-solo, its own Bitcoin node
+    ("us.stratum.sololuck.io", 3333, 3334, "US SoloLuck", "US"),  # Phoenix - true-solo, its own Bitcoin node
+    ("sg.stratum.sololuck.io", 3333, 3334, "SG SoloLuck", "SG"),  # Singapore - front door forwarding into the Jakarta pool, not a separate pool
     ("ausolo.ckpool.org", 3333, 0, "AU CKPool", "AU"),      # Australia
     ("stratum.kano.is", 3333, 0, "KanoPool", "US"),          # United States
     ("eusolo.ckpool.org", 3333, 0, "EU CKPool", "DE"),      # Germany
