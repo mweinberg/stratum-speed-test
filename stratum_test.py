@@ -87,6 +87,7 @@ PREDEFINED_SERVERS = [
     ("solo-de.solohash.co.uk", 3333, 0, "DE SoloHash", "DE"),    # Germany
     ("solo.solohash.co.uk", 3333, 0, "UK SoloHash", "UK"),    # UK
     ("pool.solomining.de", 3333, 4333, "SoloMining.de", "DE"),    # Germany
+    ("stratum.bitaxe.de", 3333, 0, "Bitaxe Pool", "DE"),    # Germany (Frankfurt)
     
     ("blitzpool.yourdevice.ch", 3333, 0, "Blitzpool", "CH"),  # Switzerland
     ("pool.sunnydecree.de", 3333, 0, "Sunnydecree Pool", "DE"),  # Germany
