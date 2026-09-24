@@ -7,7 +7,7 @@ to help you find the fastest pool from your location. Measures both network
 latency (ping) and actual stratum protocol handshake times.
 
 Features:
-  • Tests 20 popular solo mining pools worldwide
+  • Tests 21 popular solo and hybrid solo mining pools worldwide
   • Concurrent testing for fast results (~10 seconds)
   • Multiple runs for accuracy (--runs 1-3)
   • TLS connection testing (-t/--tls flag) for secure stratum connections
@@ -83,6 +83,7 @@ PREDEFINED_SERVERS = [
     ("ausolo.ckpool.org", 3333, 0, "AU CKPool", "AU"),      # Australia
     ("stratum.kano.is", 3333, 0, "KanoPool", "US"),          # United States
     ("eusolo.ckpool.org", 3333, 0, "EU CKPool", "DE"),      # Germany
+    ("stratum.btcpowlab-pool.com", 3333, 0, "BTC PoW Lab Hybrid Solo", "DE"),  # Germany
     ("eu.findmyblock.xyz", 3335, 0, "FindMyBlock", "FR"),    # France
     ("solo-de.solohash.co.uk", 3333, 0, "DE SoloHash", "DE"),    # Germany
     ("solo.solohash.co.uk", 3333, 0, "UK SoloHash", "UK"),    # UK
