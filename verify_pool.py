@@ -864,11 +864,10 @@ def verify_address_in_outputs(outputs: list, btc_address: str) -> Tuple[bool, st
             if addr_type == addr_type_expected and user_hash:
                 if addr_data.lower() == user_hash.lower():
                     return True, f"Found in output #{i+1}: {value_btc:.8f} BTC to your {addr_type} address"
-            
-            # Check if address appears as ASCII (some pools do this)
-            addr_ascii = btc_address.encode('utf-8').hex()
-            if addr_ascii in output['script_hex'].lower():
-                return True, f"Found in output #{i+1}: Address as ASCII in script"
+
+            # Note: an address appearing as text inside a script (e.g. in an
+            # OP_RETURN) is not a payment, so it deliberately does not count.
+            # Only an output whose script actually pays the address passes.
         
         return False, "Address not found in any coinbase outputs"
         
