@@ -81,7 +81,6 @@ from statistics import mean, median
 PREDEFINED_SERVERS = [
     ("solo.atlaspool.io", 3333, 4333, "AtlasPool.io", "*MANY*"),  # Anycast - Global edge network
     ("stratum.sololuck.io", 3333, 3334, "ID SoloLuck", "ID"),  # Jakarta - true-solo, its own Bitcoin node
-    ("us.stratum.sololuck.io", 3333, 3334, "US SoloLuck", "US"),  # Phoenix - true-solo, its own Bitcoin node
     ("sg.stratum.sololuck.io", 3333, 3334, "SG SoloLuck", "SG"),  # Singapore - front door forwarding into the Jakarta pool, not a separate pool
     ("ausolo.ckpool.org", 3333, 0, "AU CKPool", "AU"),      # Australia
     ("stratum.kano.is", 3333, 0, "KanoPool", "US"),          # United States
